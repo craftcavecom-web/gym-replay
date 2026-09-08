@@ -437,12 +437,6 @@ export default function Home() {
           >
             Sign In
           </button>
-          <button
-            onClick={signInWithGoogle}
-            className="mt-3 w-full rounded-xl bg-zinc-800 p-4 font-semibold"
-        >
-            Continue with Google
-        </button>
 
         <button
             onClick={forgotPassword}
