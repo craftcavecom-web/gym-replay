@@ -59,7 +59,31 @@ export default function Home() {
       );
     }
   }
+  async function signInWithGoogle() {
+  await supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: {
+      redirectTo: "https://gymcam.stream",
+    },
+  });
+  }
 
+  async function forgotPassword() {
+  if (!email) {
+    setMessage("Enter your email first.");
+    return;
+  }
+
+  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    redirectTo: "https://gymcam.stream/reset-password",
+  });
+
+  if (error) {
+    setMessage(error.message);
+  } else {
+    setMessage("Password reset email sent.");
+  }
+  }
   async function signIn() {
     setMessage("Signing in...");
 
@@ -413,6 +437,19 @@ export default function Home() {
           >
             Sign In
           </button>
+          <button
+            onClick={signInWithGoogle}
+            className="mt-3 w-full rounded-xl bg-zinc-800 p-4 font-semibold"
+        >
+            Continue with Google
+        </button>
+
+        <button
+            onClick={forgotPassword}
+            className="mt-3 w-full text-sm text-zinc-400 underline"
+          >
+            Forgot password?
+        </button>
 
           <button
             onClick={signUp}
