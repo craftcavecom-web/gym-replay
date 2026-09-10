@@ -1,99 +1,526 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import { supabase } from "./lib/supabase";
 
 const LIVE_BASE = "https://live.gymcam.stream";
 const REPLAY_BASE = "https://replay.gymcam.stream";
 
+type VideoMode = "live" | "delay" | "replay";
+
+function LivePlayer({ camera }: { camera: string }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
+    setLoading(true);
+
+    const src = `${LIVE_BASE}/${camera}/index.m3u8`;
+
+    let hls: Hls | null = null;
+
+    const jumpToLive = () => {
+      const video = videoRef.current;
+
+      if (!video) return;
+      if (!video.seekable.length) return;
+
+      const liveEdge = video.seekable.end(
+        video.seekable.length - 1
+      );
+
+      const earliest = video.seekable.start(0);
+
+      const distanceFromLive =
+        liveEdge - video.currentTime;
+
+      // Only jump forward if we fall too far behind.
+      if (distanceFromLive > 4) {
+        video.currentTime = Math.max(
+          earliest,
+          liveEdge - 2
+        );
+      }
+    };
+
+    if (Hls.isSupported()) {
+      hls = new Hls({
+        lowLatencyMode: true,
+        liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 4,
+        maxLiveSyncPlaybackRate: 1.25,
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(videoEl);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        window.setTimeout(() => {
+          jumpToLive();
+
+          videoRef.current
+            ?.play()
+            .catch(() => {});
+        }, 500);
+      });
+
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        // Ignore normal recoverable HLS stalls.
+        // Only log errors that actually stop playback.
+        if (data.fatal) {
+          console.warn(
+            "Fatal Live HLS error:",
+            data.type,
+            data.details
+          );
+        }
+      });
+    } else if (
+      videoEl.canPlayType(
+        "application/vnd.apple.mpegurl"
+      )
+    ) {
+      videoEl.src = src;
+
+      const handleLoaded = () => {
+        jumpToLive();
+
+        videoRef.current
+          ?.play()
+          .catch(() => {});
+      };
+
+      videoEl.addEventListener(
+        "loadedmetadata",
+        handleLoaded,
+        { once: true }
+      );
+    }
+
+    const timer = window.setInterval(
+      jumpToLive,
+      1500
+    );
+
+    return () => {
+      window.clearInterval(timer);
+
+      if (hls) {
+        hls.destroy();
+      }
+
+      const currentVideo =
+        videoRef.current;
+
+      if (currentVideo) {
+        currentVideo.pause();
+        currentVideo.removeAttribute("src");
+        currentVideo.load();
+      }
+    };
+  }, [camera]);
+
+  return (
+    <div className="relative">
+      {loading && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-black text-zinc-400">
+          Starting camera...
+        </div>
+      )}
+
+      <video
+        ref={videoRef}
+        controls
+        autoPlay
+        muted
+        playsInline
+        onPlaying={() => setLoading(false)}
+        onWaiting={() => setLoading(true)}
+        className="h-[500px] w-full rounded-xl bg-black"
+      />
+    </div>
+  );
+}
+
+function DelayedPlayer({
+  camera,
+  delaySeconds,
+}: {
+  camera: string;
+  delaySeconds: number;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const delayRef = useRef(delaySeconds);
+
+  const [loading, setLoading] = useState(true);
+  const [availableDelay, setAvailableDelay] =
+    useState(0);
+
+  const seekToDelay = (seconds: number) => {
+    const video = videoRef.current;
+
+    if (!video) return;
+    if (!video.seekable.length) return;
+
+    const start =
+      video.seekable.start(0);
+
+    const end =
+      video.seekable.end(
+        video.seekable.length - 1
+      );
+
+    const available =
+      Math.max(0, end - start);
+
+    setAvailableDelay(available);
+
+    const wantedDelay =
+      Math.min(seconds, available);
+
+    video.currentTime =
+      end - wantedDelay;
+  };
+
+  useEffect(() => {
+    delayRef.current =
+      delaySeconds;
+
+    seekToDelay(delaySeconds);
+  }, [delaySeconds]);
+
+  useEffect(() => {
+    const videoEl = videoRef.current;
+
+    if (!videoEl) return;
+
+    setLoading(true);
+
+    const src =
+      `${LIVE_BASE}/${camera}/index.m3u8`;
+
+    let hls: Hls | null = null;
+
+    const keepDelay = () => {
+      const video =
+        videoRef.current;
+
+      if (!video) return;
+      if (!video.seekable.length) return;
+
+      const start =
+        video.seekable.start(0);
+
+      const end =
+        video.seekable.end(
+          video.seekable.length - 1
+        );
+
+      const available =
+        Math.max(
+          0,
+          end - start
+        );
+
+      setAvailableDelay(
+        available
+      );
+
+      const wantedDelay =
+        Math.min(
+          delayRef.current,
+          available
+        );
+
+      const target =
+        end - wantedDelay;
+
+      const difference =
+        Math.abs(
+          video.currentTime -
+            target
+        );
+
+      if (difference > 2) {
+        video.currentTime =
+          target;
+      }
+    };
+
+    if (Hls.isSupported()) {
+      hls = new Hls({
+        lowLatencyMode: false,
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(videoEl);
+
+      hls.on(
+        Hls.Events.MANIFEST_PARSED,
+        () => {
+          window.setTimeout(() => {
+            seekToDelay(
+              delayRef.current
+            );
+
+            videoRef.current
+              ?.play()
+              .catch(() => {});
+          }, 500);
+        }
+      );
+
+      hls.on(
+        Hls.Events.ERROR,
+        (_event, data) => {
+          if (data.fatal) {
+            console.warn(
+              "Fatal delayed HLS error:",
+              data.type,
+              data.details
+            );
+          }
+        }
+      );
+    } else if (
+      videoEl.canPlayType(
+        "application/vnd.apple.mpegurl"
+      )
+    ) {
+      videoEl.src = src;
+
+      videoEl.addEventListener(
+        "loadedmetadata",
+        () => {
+          seekToDelay(
+            delayRef.current
+          );
+
+          videoRef.current
+            ?.play()
+            .catch(() => {});
+        },
+        { once: true }
+      );
+    }
+
+    const timer =
+      window.setInterval(
+        keepDelay,
+        1000
+      );
+
+    return () => {
+      window.clearInterval(
+        timer
+      );
+
+      if (hls) {
+        hls.destroy();
+      }
+
+      const video =
+        videoRef.current;
+
+      if (video) {
+        video.pause();
+        video.removeAttribute(
+          "src"
+        );
+        video.load();
+      }
+    };
+  }, [camera]);
+
+  return (
+    <div>
+      <div className="relative">
+        {loading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-black text-zinc-400">
+            Starting delayed stream...
+          </div>
+        )}
+
+        <video
+          ref={videoRef}
+          controls
+          autoPlay
+          muted
+          playsInline
+          onPlaying={() =>
+            setLoading(false)
+          }
+          onWaiting={() =>
+            setLoading(true)
+          }
+          className="h-[500px] w-full rounded-xl bg-black"
+        />
+      </div>
+
+      <p className="mt-3 text-sm text-zinc-400">
+        Available history:{" "}
+        {Math.floor(
+          availableDelay
+        )}{" "}
+        sec
+      </p>
+    </div>
+  );
+}
+
 export default function Home() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [message, setMessage] = useState("");
-  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [email, setEmail] =
+    useState("");
 
-  const [gymOpen, setGymOpen] = useState(false);
+  const [password, setPassword] =
+    useState("");
 
-  const [camera, setCamera] = useState("cam1");
-  const [cameraName, setCameraName] = useState("Floor");
+  const [message, setMessage] =
+    useState("");
 
-  const [replaySeconds, setReplaySeconds] = useState(30);
-  const [replayUrl, setReplayUrl] = useState("");
-  const [isReplay, setIsReplay] = useState(false);
-  const [status, setStatus] = useState("● LIVE");
-  const [replayMessage, setReplayMessage] = useState("");
+  const [userEmail, setUserEmail] =
+    useState<string | null>(
+      null
+    );
+
+  const [gymOpen, setGymOpen] =
+    useState(false);
+
+  const [camera, setCamera] =
+    useState("cam1");
+
+  const [
+    cameraName,
+    setCameraName,
+  ] = useState("Floor");
+
+  const [mode, setMode] =
+    useState<VideoMode>("live");
+
+  const [
+    delaySeconds,
+    setDelaySeconds,
+  ] = useState(30);
+
+  const [
+    replaySeconds,
+    setReplaySeconds,
+  ] = useState(30);
+
+  const [
+    replayUrl,
+    setReplayUrl,
+  ] = useState("");
+
+  const [
+    replayMessage,
+    setReplayMessage,
+  ] = useState("");
 
   useEffect(() => {
     checkUser();
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserEmail(session?.user?.email ?? null);
-    });
+    } =
+      supabase.auth.onAuthStateChange(
+        (_event, session) => {
+          setUserEmail(
+            session?.user
+              ?.email ?? null
+          );
+        }
+      );
 
-    return () => subscription.unsubscribe();
+    return () =>
+      subscription.unsubscribe();
   }, []);
 
   async function checkUser() {
     const {
       data: { user },
-    } = await supabase.auth.getUser();
+    } =
+      await supabase.auth.getUser();
 
-    setUserEmail(user?.email ?? null);
+    setUserEmail(
+      user?.email ?? null
+    );
   }
 
   async function signUp() {
-    setMessage("Creating account...");
+    setMessage(
+      "Creating account..."
+    );
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-    });
+    const { error } =
+      await supabase.auth.signUp(
+        {
+          email,
+          password,
+        }
+      );
 
     if (error) {
-      setMessage(error.message);
+      setMessage(
+        error.message
+      );
     } else {
       setMessage(
         "Account created. Check your email if confirmation is required."
       );
     }
   }
-  async function signInWithGoogle() {
-  await supabase.auth.signInWithOAuth({
-    provider: "google",
-    options: {
-      redirectTo: "https://gymcam.stream",
-    },
-  });
-  }
 
   async function forgotPassword() {
-  if (!email) {
-    setMessage("Enter your email first.");
-    return;
-  }
+    if (!email) {
+      setMessage(
+        "Enter your email first."
+      );
 
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
-    redirectTo: "https://gymcam.stream/reset-password",
-  });
+      return;
+    }
 
-  if (error) {
-    setMessage(error.message);
-  } else {
-    setMessage("Password reset email sent.");
-  }
-  }
-  async function signIn() {
-    setMessage("Signing in...");
-
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    const { error } =
+      await supabase.auth.resetPasswordForEmail(
+        email,
+        {
+          redirectTo:
+            "https://gymcam.stream/reset-password",
+        }
+      );
 
     if (error) {
-      setMessage(error.message);
+      setMessage(
+        error.message
+      );
+    } else {
+      setMessage(
+        "Password reset email sent."
+      );
+    }
+  }
+
+  async function signIn() {
+    setMessage(
+      "Signing in..."
+    );
+
+    const { error } =
+      await supabase.auth.signInWithPassword(
+        {
+          email,
+          password,
+        }
+      );
+
+    if (error) {
+      setMessage(
+        error.message
+      );
     } else {
       setMessage("");
     }
@@ -103,30 +530,41 @@ export default function Home() {
     await supabase.auth.signOut();
 
     setGymOpen(false);
-    setIsReplay(false);
+    setMode("live");
     setReplayUrl("");
-    setStatus("● LIVE");
+    setReplayMessage("");
   }
 
-  function selectCamera(stream: string, name: string) {
+  function selectCamera(
+    stream: string,
+    name: string
+  ) {
     setCamera(stream);
     setCameraName(name);
 
-    setIsReplay(false);
+    setMode("live");
     setReplayUrl("");
     setReplayMessage("");
-    setStatus("● LIVE");
   }
 
-  function formatReplayTime(seconds: number) {
+  function formatTime(
+    seconds: number
+  ) {
     if (seconds < 60) {
-      return `${seconds} seconds`;
+      return `${seconds} sec`;
     }
 
-    const minutes = Math.floor(seconds / 60);
-    const remaining = seconds % 60;
+    const minutes =
+      Math.floor(
+        seconds / 60
+      );
 
-    if (remaining === 0) {
+    const remaining =
+      seconds % 60;
+
+    if (
+      remaining === 0
+    ) {
       return `${minutes} min`;
     }
 
@@ -136,75 +574,96 @@ export default function Home() {
   async function loadReplay() {
     try {
       setReplayMessage("");
-      setStatus("Loading replay...");
 
-      const response = await fetch(
-        `${REPLAY_BASE}/list?path=${camera}`
-      );
+      const response =
+        await fetch(
+          `${REPLAY_BASE}/list?path=${camera}`
+        );
 
       if (!response.ok) {
-        throw new Error("Could not load replay list.");
+        throw new Error(
+          "Could not load replay list."
+        );
       }
 
-      const recordings = await response.json();
+      const recordings =
+        await response.json();
 
-      if (!recordings || recordings.length === 0) {
-        setReplayMessage("No replay available yet.");
-        setStatus("● LIVE");
+      if (
+        !recordings ||
+        recordings.length ===
+          0
+      ) {
+        setReplayMessage(
+          "No replay available yet."
+        );
+
         return;
       }
 
-      const latest = recordings[recordings.length - 1];
+      const latest =
+        recordings[
+          recordings.length - 1
+        ];
 
-      const recordingStart = new Date(latest.start).getTime();
+      const recordingStart =
+        new Date(
+          latest.start
+        ).getTime();
 
       const recordingEnd =
-        recordingStart + latest.duration * 1000;
+        recordingStart +
+        latest.duration *
+          1000;
 
-      const amount = Math.min(
-        replaySeconds,
-        latest.duration
-      );
+      const amount =
+        Math.min(
+          replaySeconds,
+          latest.duration
+        );
 
-      const replayStart = new Date(
-        recordingEnd - amount * 1000
-      ).toISOString();
+      const replayStart =
+        new Date(
+          recordingEnd -
+            amount * 1000
+        ).toISOString();
 
       const url =
         `${REPLAY_BASE}/get` +
         `?path=${camera}` +
-        `&start=${encodeURIComponent(replayStart)}` +
+        `&start=${encodeURIComponent(
+          replayStart
+        )}` +
         `&duration=${amount}` +
         `&format=mp4`;
 
       setReplayUrl(url);
-      setIsReplay(true);
-      setStatus(`⏪ REPLAY`);
+      setMode("replay");
     } catch (error) {
-      console.error(error);
-
       setReplayMessage(
         error instanceof Error
           ? error.message
           : "Replay failed."
       );
-
-      setStatus("Replay Error");
     }
   }
 
   function goLive() {
-    setIsReplay(false);
+    setMode("live");
     setReplayUrl("");
     setReplayMessage("");
-    setStatus("● LIVE");
   }
 
-  if (userEmail && gymOpen) {
+  if (
+    userEmail &&
+    gymOpen
+  ) {
     return (
       <main className="min-h-screen bg-black text-white">
         <div className="mx-auto max-w-6xl p-6">
+
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
+
             <div>
               <h1 className="text-3xl font-bold">
                 Test Gym
@@ -217,7 +676,10 @@ export default function Home() {
 
             <button
               onClick={() => {
-                setGymOpen(false);
+                setGymOpen(
+                  false
+                );
+
                 goLive();
               }}
               className="rounded-xl bg-zinc-800 px-4 py-3"
@@ -227,12 +689,17 @@ export default function Home() {
           </div>
 
           <div className="mt-6 flex flex-wrap gap-3">
+
             <button
               onClick={() =>
-                selectCamera("cam1", "Floor")
+                selectCamera(
+                  "cam1",
+                  "Floor"
+                )
               }
               className={`rounded-xl px-5 py-3 font-medium ${
-                camera === "cam1"
+                camera ===
+                "cam1"
                   ? "bg-white text-black"
                   : "bg-zinc-800 text-white"
               }`}
@@ -242,10 +709,14 @@ export default function Home() {
 
             <button
               onClick={() =>
-                selectCamera("cam2", "High Bar")
+                selectCamera(
+                  "cam2",
+                  "High Bar"
+                )
               }
               className={`rounded-xl px-5 py-3 font-medium ${
-                camera === "cam2"
+                camera ===
+                "cam2"
                   ? "bg-white text-black"
                   : "bg-zinc-800 text-white"
               }`}
@@ -255,92 +726,225 @@ export default function Home() {
           </div>
 
           <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+
               <h2 className="text-2xl font-semibold">
                 {cameraName}
               </h2>
 
               <span
                 className={`font-semibold ${
-                  isReplay
-                    ? "text-yellow-400"
-                    : "text-red-500"
+                  mode === "live"
+                    ? "text-red-500"
+                    : mode === "delay"
+                    ? "text-blue-400"
+                    : "text-yellow-400"
                 }`}
               >
-                {status}
+                {mode ===
+                  "live" &&
+                  "● LIVE"}
+
+                {mode ===
+                  "delay" &&
+                  `◷ ${formatTime(
+                    delaySeconds
+                  )} DELAY`}
+
+                {mode ===
+                  "replay" &&
+                  "⏪ REPLAY"}
               </span>
             </div>
 
-            {!isReplay ? (
-              <iframe
-                key={camera}
-                src={`${LIVE_BASE}/${camera}`}
-                className="h-[500px] w-full rounded-xl border-0 bg-black"
-                allow="autoplay; fullscreen"
-              />
-            ) : (
-              <video
-                key={replayUrl}
-                src={replayUrl}
-                controls
-                autoPlay
-                playsInline
-                className="h-[500px] w-full rounded-xl bg-black"
+            {mode ===
+              "live" && (
+              <LivePlayer
+                camera={
+                  camera
+                }
               />
             )}
+
+            {mode ===
+              "delay" && (
+              <DelayedPlayer
+                camera={
+                  camera
+                }
+                delaySeconds={
+                  delaySeconds
+                }
+              />
+            )}
+
+            {mode ===
+              "replay" &&
+              replayUrl && (
+                <video
+                  key={
+                    replayUrl
+                  }
+                  src={
+                    replayUrl
+                  }
+                  controls
+                  autoPlay
+                  playsInline
+                  className="h-[500px] w-full rounded-xl bg-black"
+                />
+              )}
           </section>
 
           <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+
             <h3 className="text-xl font-semibold">
-              Replay
+              Delayed Live
             </h3>
 
             <p className="mt-2 text-zinc-400">
-              Choose how far back you want to replay.
+              Continuously watch
+              the camera this far
+              behind real time.
             </p>
 
             <div className="mt-5 text-2xl font-semibold">
-              {formatReplayTime(replaySeconds)}
+              {formatTime(
+                delaySeconds
+              )}{" "}
+              behind
             </div>
 
             <input
               type="range"
-              min="10"
-              max="120"
+              min="5"
+              max="300"
               step="5"
-              value={replaySeconds}
+              value={
+                delaySeconds
+              }
               onChange={(e) =>
-                setReplaySeconds(
-                  Number(e.target.value)
+                setDelaySeconds(
+                  Number(
+                    e.target
+                      .value
+                  )
                 )
               }
               className="mt-5 w-full"
             />
 
             <div className="mt-1 flex justify-between text-sm text-zinc-500">
-              <span>10 sec</span>
-              <span>2 min</span>
+              <span>
+                5 sec
+              </span>
+
+              <span>
+                5 min
+              </span>
             </div>
 
             <div className="mt-5 flex flex-wrap gap-3">
+
               <button
-                onClick={loadReplay}
+                onClick={() =>
+                  setMode(
+                    "delay"
+                  )
+                }
+                className="rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white"
+              >
+                ▶ Start
+                Delayed Live
+              </button>
+
+              <button
+                onClick={
+                  goLive
+                }
+                className="rounded-xl bg-zinc-800 px-5 py-3 font-semibold"
+              >
+                🔴 Back to
+                Live
+              </button>
+            </div>
+          </section>
+
+          <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+
+            <h3 className="text-xl font-semibold">
+              Replay
+            </h3>
+
+            <p className="mt-2 text-zinc-400">
+              Choose how far
+              back you want to
+              replay.
+            </p>
+
+            <div className="mt-5 text-2xl font-semibold">
+              {formatTime(
+                replaySeconds
+              )}
+            </div>
+
+            <input
+              type="range"
+              min="10"
+              max="300"
+              step="5"
+              value={
+                replaySeconds
+              }
+              onChange={(e) =>
+                setReplaySeconds(
+                  Number(
+                    e.target
+                      .value
+                  )
+                )
+              }
+              className="mt-5 w-full"
+            />
+
+            <div className="mt-1 flex justify-between text-sm text-zinc-500">
+              <span>
+                10 sec
+              </span>
+
+              <span>
+                5 min
+              </span>
+            </div>
+
+            <div className="mt-5 flex flex-wrap gap-3">
+
+              <button
+                onClick={
+                  loadReplay
+                }
                 className="rounded-xl bg-white px-5 py-3 font-semibold text-black"
               >
                 ⏪ Load Replay
               </button>
 
               <button
-                onClick={goLive}
+                onClick={
+                  goLive
+                }
                 className="rounded-xl bg-zinc-800 px-5 py-3 font-semibold"
               >
-                🔴 Back to Live
+                🔴 Back to
+                Live
               </button>
             </div>
 
             {replayMessage && (
               <p className="mt-4 text-sm text-red-400">
-                {replayMessage}
+                {
+                  replayMessage
+                }
               </p>
             )}
           </section>
@@ -353,7 +957,9 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-black text-white">
         <div className="mx-auto max-w-5xl p-6">
+
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
+
             <div>
               <h1 className="text-3xl font-bold">
                 Gym Replay
@@ -365,7 +971,9 @@ export default function Home() {
             </div>
 
             <button
-              onClick={signOut}
+              onClick={
+                signOut
+              }
               className="rounded-xl bg-zinc-800 px-4 py-3"
             >
               Sign Out
@@ -373,11 +981,13 @@ export default function Home() {
           </div>
 
           <section className="mt-8">
+
             <h2 className="text-2xl font-semibold">
               Your Gyms
             </h2>
 
             <div className="mt-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
               <h3 className="text-xl font-semibold">
                 Test Gym
               </h3>
@@ -387,7 +997,11 @@ export default function Home() {
               </p>
 
               <button
-                onClick={() => setGymOpen(true)}
+                onClick={() =>
+                  setGymOpen(
+                    true
+                  )
+                }
                 className="mt-5 rounded-xl bg-white px-5 py-3 font-semibold text-black"
               >
                 Open Gym
@@ -402,21 +1016,26 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-black text-white">
       <div className="mx-auto max-w-md p-6 pt-20">
+
         <h1 className="text-4xl font-bold">
           Gym Replay
         </h1>
 
         <p className="mt-2 text-zinc-400">
-          Sign in to access your gym cameras.
+          Sign in to access
+          your gym cameras.
         </p>
 
         <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
           <input
             type="email"
             placeholder="Email"
             value={email}
             onChange={(e) =>
-              setEmail(e.target.value)
+              setEmail(
+                e.target.value
+              )
             }
             className="w-full rounded-xl border border-zinc-700 bg-zinc-900 p-4"
           />
@@ -424,29 +1043,39 @@ export default function Home() {
           <input
             type="password"
             placeholder="Password"
-            value={password}
+            value={
+              password
+            }
             onChange={(e) =>
-              setPassword(e.target.value)
+              setPassword(
+                e.target.value
+              )
             }
             className="mt-3 w-full rounded-xl border border-zinc-700 bg-zinc-900 p-4"
           />
 
           <button
-            onClick={signIn}
+            onClick={
+              signIn
+            }
             className="mt-4 w-full rounded-xl bg-white p-4 font-semibold text-black"
           >
             Sign In
           </button>
 
-        <button
-            onClick={forgotPassword}
+          <button
+            onClick={
+              forgotPassword
+            }
             className="mt-3 w-full text-sm text-zinc-400 underline"
           >
             Forgot password?
-        </button>
+          </button>
 
           <button
-            onClick={signUp}
+            onClick={
+              signUp
+            }
             className="mt-3 w-full rounded-xl bg-zinc-800 p-4 font-semibold"
           >
             Create Account
