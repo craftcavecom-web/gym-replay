@@ -29,11 +29,7 @@ type AccessRow = {
   role: string;
 };
 
-function LivePlayer({
-  camera,
-}: {
-  camera: string;
-}) {
+function LivePlayer({ camera }: { camera: string }) {
   return (
     <iframe
       key={camera}
@@ -51,69 +47,43 @@ function DelayedPlayer({
   camera: string;
   delaySeconds: number;
 }) {
-  const videoRef =
-    useRef<HTMLVideoElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const delayRef = useRef(delaySeconds);
 
-  const delayRef =
-    useRef(delaySeconds);
+  const [loading, setLoading] = useState(true);
+  const [availableDelay, setAvailableDelay] = useState(0);
 
-  const [loading, setLoading] =
-    useState(true);
-
-  const [
-    availableDelay,
-    setAvailableDelay,
-  ] = useState(0);
-
-  function seekToDelay(
-    seconds: number
-  ) {
-    const video =
-      videoRef.current;
+  function seekToDelay(seconds: number) {
+    const video = videoRef.current;
 
     if (!video) return;
     if (!video.seekable.length) return;
 
-    const start =
-      video.seekable.start(0);
+    const start = video.seekable.start(0);
 
-    const end =
-      video.seekable.end(
-        video.seekable.length - 1
-      );
+    const end = video.seekable.end(
+      video.seekable.length - 1
+    );
 
-    const available =
-      Math.max(
-        0,
-        end - start
-      );
+    const available = Math.max(0, end - start);
 
-    setAvailableDelay(
+    setAvailableDelay(available);
+
+    const wantedDelay = Math.min(
+      seconds,
       available
     );
 
-    const wantedDelay =
-      Math.min(
-        seconds,
-        available
-      );
-
-    video.currentTime =
-      end - wantedDelay;
+    video.currentTime = end - wantedDelay;
   }
 
   useEffect(() => {
-    delayRef.current =
-      delaySeconds;
-
-    seekToDelay(
-      delaySeconds
-    );
+    delayRef.current = delaySeconds;
+    seekToDelay(delaySeconds);
   }, [delaySeconds]);
 
   useEffect(() => {
-    const videoEl =
-      videoRef.current;
+    const videoEl = videoRef.current;
 
     if (!videoEl) return;
 
@@ -122,87 +92,61 @@ function DelayedPlayer({
     const src =
       `${HLS_BASE}/${camera}/index.m3u8`;
 
-    let hls: Hls | null =
-      null;
+    let hls: Hls | null = null;
 
     const keepDelay = () => {
-      const video =
-        videoRef.current;
+      const video = videoRef.current;
 
       if (!video) return;
       if (!video.seekable.length) return;
 
-      const start =
-        video.seekable.start(0);
+      const start = video.seekable.start(0);
 
-      const end =
-        video.seekable.end(
-          video.seekable.length - 1
-        );
+      const end = video.seekable.end(
+        video.seekable.length - 1
+      );
 
-      const available =
-        Math.max(
-          0,
-          end - start
-        );
+      const available = Math.max(
+        0,
+        end - start
+      );
 
-      setAvailableDelay(
+      setAvailableDelay(available);
+
+      const wantedDelay = Math.min(
+        delayRef.current,
         available
       );
 
-      const wantedDelay =
-        Math.min(
-          delayRef.current,
-          available
-        );
+      const target = end - wantedDelay;
 
-      const target =
-        end - wantedDelay;
+      const difference = Math.abs(
+        video.currentTime - target
+      );
 
-      const difference =
-        Math.abs(
-          video.currentTime -
-            target
-        );
-
-      if (
-        difference > 2
-      ) {
-        video.currentTime =
-          target;
+      if (difference > 2) {
+        video.currentTime = target;
       }
     };
 
-    if (
-      Hls.isSupported()
-    ) {
+    if (Hls.isSupported()) {
       hls = new Hls({
         lowLatencyMode: false,
       });
 
       hls.loadSource(src);
-
-      hls.attachMedia(
-        videoEl
-      );
+      hls.attachMedia(videoEl);
 
       hls.on(
         Hls.Events.MANIFEST_PARSED,
         () => {
-          window.setTimeout(
-            () => {
-              seekToDelay(
-                delayRef.current
-              );
+          window.setTimeout(() => {
+            seekToDelay(delayRef.current);
 
-              videoRef.current
-                ?.play()
-                .catch(
-                  () => {}
-                );
-            },
-            500
-          );
+            videoRef.current
+              ?.play()
+              .catch(() => {});
+          }, 500);
         }
       );
 
@@ -223,51 +167,38 @@ function DelayedPlayer({
         "application/vnd.apple.mpegurl"
       )
     ) {
-      videoEl.src =
-        src;
+      videoEl.src = src;
 
       videoEl.addEventListener(
         "loadedmetadata",
         () => {
-          seekToDelay(
-            delayRef.current
-          );
+          seekToDelay(delayRef.current);
 
           videoRef.current
             ?.play()
-            .catch(
-              () => {}
-            );
+            .catch(() => {});
         },
         { once: true }
       );
     }
 
-    const timer =
-      window.setInterval(
-        keepDelay,
-        1000
-      );
+    const timer = window.setInterval(
+      keepDelay,
+      1000
+    );
 
     return () => {
-      window.clearInterval(
-        timer
-      );
+      window.clearInterval(timer);
 
       if (hls) {
         hls.destroy();
       }
 
-      const video =
-        videoRef.current;
+      const video = videoRef.current;
 
       if (video) {
         video.pause();
-
-        video.removeAttribute(
-          "src"
-        );
-
+        video.removeAttribute("src");
         video.load();
       }
     };
@@ -288,140 +219,86 @@ function DelayedPlayer({
           autoPlay
           muted
           playsInline
-          onPlaying={() =>
-            setLoading(false)
-          }
-          onWaiting={() =>
-            setLoading(true)
-          }
+          onPlaying={() => setLoading(false)}
+          onWaiting={() => setLoading(true)}
           className="h-[500px] w-full rounded-xl bg-black"
         />
       </div>
 
       <p className="mt-3 text-sm text-zinc-400">
         Available history:{" "}
-        {Math.floor(
-          availableDelay
-        )}{" "}
-        sec
+        {Math.floor(availableDelay)} sec
       </p>
     </div>
   );
 }
 
 export default function Home() {
-  const [email, setEmail] =
-    useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
 
-  const [password, setPassword] =
-    useState("");
+  const [userEmail, setUserEmail] =
+    useState<string | null>(null);
 
-  const [message, setMessage] =
-    useState("");
-
-  const [
-    userEmail,
-    setUserEmail,
-  ] =
-    useState<string | null>(
-      null
-    );
-
-  const [
-    userId,
-    setUserId,
-  ] =
-    useState<string | null>(
-      null
-    );
+  const [userId, setUserId] =
+    useState<string | null>(null);
 
   const [gyms, setGyms] =
     useState<Gym[]>([]);
 
-  const [
-    gymsLoading,
-    setGymsLoading,
-  ] =
+  const [gymsLoading, setGymsLoading] =
     useState(false);
 
-  const [
-    selectedGym,
-    setSelectedGym,
-  ] =
-    useState<Gym | null>(
-      null
-    );
+  const [selectedGym, setSelectedGym] =
+    useState<Gym | null>(null);
 
-  const [
-    cameras,
-    setCameras,
-  ] =
+  const [cameras, setCameras] =
     useState<Camera[]>([]);
 
-  const [
-    camerasLoading,
-    setCamerasLoading,
-  ] =
+  const [camerasLoading, setCamerasLoading] =
     useState(false);
 
-  const [
-    selectedCamera,
-    setSelectedCamera,
-  ] =
-    useState<Camera | null>(
-      null
-    );
+  const [selectedCamera, setSelectedCamera] =
+    useState<Camera | null>(null);
 
   const [mode, setMode] =
-    useState<VideoMode>(
-      "live"
-    );
+    useState<VideoMode>("live");
 
-  const [
-    delaySeconds,
-    setDelaySeconds,
-  ] =
+  const [delaySeconds, setDelaySeconds] =
     useState(30);
 
-  const [
-    replaySeconds,
-    setReplaySeconds,
-  ] =
+  const [replaySeconds, setReplaySeconds] =
     useState(30);
 
-  const [
-    replayUrl,
-    setReplayUrl,
-  ] =
+  const [replayUrl, setReplayUrl] =
     useState("");
 
-  const [
-    replayMessage,
-    setReplayMessage,
-  ] =
+  const [replayMessage, setReplayMessage] =
+    useState("");
+
+  const [joinCode, setJoinCode] =
+    useState("");
+
+  const [joinMessage, setJoinMessage] =
     useState("");
 
   useEffect(() => {
     checkUser();
 
     const {
-      data: {
-        subscription,
-      },
+      data: { subscription },
     } =
       supabase.auth.onAuthStateChange(
         (_event, session) => {
-          const user =
-            session?.user;
+          const user = session?.user;
 
           setUserEmail(
-            user?.email ??
-              null
+            user?.email ?? null
           );
 
           setUserId(
-            user?.id ??
-              null
+            user?.id ?? null
           );
         }
       );
@@ -432,9 +309,7 @@ export default function Home() {
 
   useEffect(() => {
     if (userId) {
-      loadGyms(
-        userId
-      );
+      loadGyms(userId);
     } else {
       setGyms([]);
     }
@@ -447,13 +322,11 @@ export default function Home() {
       await supabase.auth.getUser();
 
     setUserEmail(
-      user?.email ??
-        null
+      user?.email ?? null
     );
 
     setUserId(
-      user?.id ??
-        null
+      user?.id ?? null
     );
   }
 
@@ -467,52 +340,36 @@ export default function Home() {
       error: accessError,
     } =
       await supabase
-        .from(
-          "user_gym_access"
-        )
-        .select(
-          "gym_id, role"
-        )
+        .from("user_gym_access")
+        .select("gym_id, role")
         .eq(
           "user_id",
           currentUserId
         );
 
     if (accessError) {
-      console.warn(
-        accessError
-      );
+      console.warn(accessError);
 
       setMessage(
         "Could not load gym access."
       );
 
-      setGymsLoading(
-        false
-      );
-
+      setGymsLoading(false);
       return;
     }
 
     const access =
-      (accessRows ??
-        []) as AccessRow[];
+      (accessRows ?? []) as AccessRow[];
 
-    if (
-      access.length === 0
-    ) {
+    if (access.length === 0) {
       setGyms([]);
-      setGymsLoading(
-        false
-      );
-
+      setGymsLoading(false);
       return;
     }
 
     const gymIds =
       access.map(
-        (row) =>
-          row.gym_id
+        (row) => row.gym_id
       );
 
     const {
@@ -530,18 +387,13 @@ export default function Home() {
         );
 
     if (gymError) {
-      console.warn(
-        gymError
-      );
+      console.warn(gymError);
 
       setMessage(
         "Could not load gyms."
       );
 
-      setGymsLoading(
-        false
-      );
-
+      setGymsLoading(false);
       return;
     }
 
@@ -556,49 +408,81 @@ export default function Home() {
       );
 
     const finalGyms: Gym[] =
-      (
-        gymRows ?? []
-      ).map((gym) => ({
-        id: gym.id,
-        name: gym.name,
-        slug: gym.slug,
-        role:
-          roleMap.get(
-            gym.id
-          ) ??
-          "athlete",
-      }));
+      (gymRows ?? []).map(
+        (gym) => ({
+          id: gym.id,
+          name: gym.name,
+          slug: gym.slug,
+          role:
+            roleMap.get(
+              gym.id
+            ) ?? "athlete",
+        })
+      );
 
-    setGyms(
-      finalGyms
+    setGyms(finalGyms);
+    setGymsLoading(false);
+  }
+
+  async function joinGym() {
+    if (!joinCode.trim()) {
+      setJoinMessage(
+        "Enter a gym code."
+      );
+      return;
+    }
+
+    if (!userId) {
+      setJoinMessage(
+        "You must be signed in."
+      );
+      return;
+    }
+
+    setJoinMessage(
+      "Joining gym..."
     );
 
-    setGymsLoading(
-      false
+    const { error } =
+      await supabase.rpc(
+        "join_gym_with_code",
+        {
+          p_code:
+            joinCode.trim(),
+        }
+      );
+
+    if (error) {
+      console.warn(error);
+
+      setJoinMessage(
+        "Invalid gym code."
+      );
+      return;
+    }
+
+    setJoinCode("");
+
+    setJoinMessage(
+      "Gym joined!"
     );
+
+    await loadGyms(userId);
   }
 
   async function openGym(
     gym: Gym
   ) {
-    setSelectedGym(
-      gym
-    );
+    setSelectedGym(gym);
 
     setCameras([]);
-    setSelectedCamera(
-      null
-    );
+    setSelectedCamera(null);
 
     setMode("live");
-
     setReplayUrl("");
-
     setReplayMessage("");
 
-    setCamerasLoading(
-      true
-    );
+    setCamerasLoading(true);
 
     const {
       data,
@@ -616,78 +500,54 @@ export default function Home() {
         .order(
           "created_at",
           {
-            ascending:
-              true,
+            ascending: true,
           }
         );
 
     if (error) {
-      console.warn(
-        error
-      );
+      console.warn(error);
 
       setReplayMessage(
         "Could not load cameras."
       );
 
-      setCamerasLoading(
-        false
-      );
-
+      setCamerasLoading(false);
       return;
     }
 
     const cameraRows =
-      (data ??
-        []) as Camera[];
+      (data ?? []) as Camera[];
 
-    setCameras(
-      cameraRows
-    );
+    setCameras(cameraRows);
 
     if (
-      cameraRows.length >
-      0
+      cameraRows.length > 0
     ) {
       setSelectedCamera(
         cameraRows[0]
       );
     }
 
-    setCamerasLoading(
-      false
-    );
+    setCamerasLoading(false);
   }
 
   function closeGym() {
-    setSelectedGym(
-      null
-    );
-
-    setSelectedCamera(
-      null
-    );
-
+    setSelectedGym(null);
+    setSelectedCamera(null);
     setCameras([]);
 
     setMode("live");
-
     setReplayUrl("");
-
     setReplayMessage("");
   }
 
   function chooseCamera(
     camera: Camera
   ) {
-    setSelectedCamera(
-      camera
-    );
+    setSelectedCamera(camera);
 
     setMode("live");
-
     setReplayUrl("");
-
     setReplayMessage("");
   }
 
@@ -697,12 +557,10 @@ export default function Home() {
     );
 
     const { error } =
-      await supabase.auth.signUp(
-        {
-          email,
-          password,
-        }
-      );
+      await supabase.auth.signUp({
+        email,
+        password,
+      });
 
     if (error) {
       setMessage(
@@ -769,32 +627,25 @@ export default function Home() {
   async function signOut() {
     await supabase.auth.signOut();
 
-    setUserEmail(
-      null
-    );
-
+    setUserEmail(null);
     setUserId(null);
 
-    setSelectedGym(
-      null
-    );
-
-    setSelectedCamera(
-      null
-    );
+    setSelectedGym(null);
+    setSelectedCamera(null);
 
     setGyms([]);
     setCameras([]);
 
     setReplayUrl("");
+
+    setJoinCode("");
+    setJoinMessage("");
   }
 
   function formatTime(
     seconds: number
   ) {
-    if (
-      seconds < 60
-    ) {
+    if (seconds < 60) {
       return `${seconds} sec`;
     }
 
@@ -806,9 +657,7 @@ export default function Home() {
     const remaining =
       seconds % 60;
 
-    if (
-      remaining === 0
-    ) {
+    if (remaining === 0) {
       return `${minutes} min`;
     }
 
@@ -816,16 +665,12 @@ export default function Home() {
   }
 
   async function loadReplay() {
-    if (
-      !selectedCamera
-    ) {
+    if (!selectedCamera) {
       return;
     }
 
     try {
-      setReplayMessage(
-        ""
-      );
+      setReplayMessage("");
 
       const path =
         selectedCamera.stream_path;
@@ -835,9 +680,7 @@ export default function Home() {
           `${REPLAY_BASE}/list?path=${path}`
         );
 
-      if (
-        !response.ok
-      ) {
+      if (!response.ok) {
         throw new Error(
           "Could not load replay list."
         );
@@ -848,20 +691,17 @@ export default function Home() {
 
       if (
         !recordings ||
-        recordings.length ===
-          0
+        recordings.length === 0
       ) {
         setReplayMessage(
           "No replay available yet."
         );
-
         return;
       }
 
       const latest =
         recordings[
-          recordings.length -
-            1
+          recordings.length - 1
         ];
 
       const recordingStart =
@@ -871,8 +711,7 @@ export default function Home() {
 
       const recordingEnd =
         recordingStart +
-        latest.duration *
-          1000;
+        latest.duration * 1000;
 
       const amount =
         Math.min(
@@ -883,8 +722,7 @@ export default function Home() {
       const replayStart =
         new Date(
           recordingEnd -
-            amount *
-              1000
+            amount * 1000
         ).toISOString();
 
       const url =
@@ -896,13 +734,8 @@ export default function Home() {
         `&duration=${amount}` +
         `&format=mp4`;
 
-      setReplayUrl(
-        url
-      );
-
-      setMode(
-        "replay"
-      );
+      setReplayUrl(url);
+      setMode("replay");
     } catch (error) {
       setReplayMessage(
         error instanceof Error
@@ -914,9 +747,7 @@ export default function Home() {
 
   function goLive() {
     setMode("live");
-
     setReplayUrl("");
-
     setReplayMessage("");
   }
 
@@ -927,27 +758,22 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-black text-white">
         <div className="mx-auto max-w-6xl p-6">
+
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
             <div>
               <h1 className="text-3xl font-bold">
-                {
-                  selectedGym.name
-                }
+                {selectedGym.name}
               </h1>
 
               <p className="text-sm text-zinc-400">
                 {userEmail}
                 {" · "}
-                {
-                  selectedGym.role
-                }
+                {selectedGym.role}
               </p>
             </div>
 
             <button
-              onClick={
-                closeGym
-              }
+              onClick={closeGym}
               className="rounded-xl bg-zinc-800 px-4 py-3"
             >
               Back
@@ -956,27 +782,20 @@ export default function Home() {
 
           {camerasLoading ? (
             <p className="mt-8 text-zinc-400">
-              Loading
-              cameras...
+              Loading cameras...
             </p>
-          ) : cameras.length ===
-            0 ? (
+          ) : cameras.length === 0 ? (
             <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
-              No cameras
-              are configured
+              No cameras are configured
               for this gym.
             </div>
           ) : (
             <>
               <div className="mt-6 flex flex-wrap gap-3">
                 {cameras.map(
-                  (
-                    camera
-                  ) => (
+                  (camera) => (
                     <button
-                      key={
-                        camera.id
-                      }
+                      key={camera.id}
                       onClick={() =>
                         chooseCamera(
                           camera
@@ -989,9 +808,7 @@ export default function Home() {
                           : "bg-zinc-800 text-white"
                       }`}
                     >
-                      {
-                        camera.name
-                      }
+                      {camera.name}
                     </button>
                   )
                 )}
@@ -1000,6 +817,7 @@ export default function Home() {
               {selectedCamera && (
                 <>
                   <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                       <h2 className="text-2xl font-semibold">
                         {
@@ -1009,33 +827,27 @@ export default function Home() {
 
                       <span
                         className={`font-semibold ${
-                          mode ===
-                          "live"
+                          mode === "live"
                             ? "text-red-500"
-                            : mode ===
-                              "delay"
+                            : mode === "delay"
                             ? "text-blue-400"
                             : "text-yellow-400"
                         }`}
                       >
-                        {mode ===
-                          "live" &&
+                        {mode === "live" &&
                           "● LIVE"}
 
-                        {mode ===
-                          "delay" &&
+                        {mode === "delay" &&
                           `◷ ${formatTime(
                             delaySeconds
                           )} DELAY`}
 
-                        {mode ===
-                          "replay" &&
+                        {mode === "replay" &&
                           "⏪ REPLAY"}
                       </span>
                     </div>
 
-                    {mode ===
-                      "live" && (
+                    {mode === "live" && (
                       <LivePlayer
                         camera={
                           selectedCamera.stream_path
@@ -1043,8 +855,7 @@ export default function Home() {
                       />
                     )}
 
-                    {mode ===
-                      "delay" && (
+                    {mode === "delay" && (
                       <DelayedPlayer
                         camera={
                           selectedCamera.stream_path
@@ -1055,16 +866,11 @@ export default function Home() {
                       />
                     )}
 
-                    {mode ===
-                      "replay" &&
+                    {mode === "replay" &&
                       replayUrl && (
                         <video
-                          key={
-                            replayUrl
-                          }
-                          src={
-                            replayUrl
-                          }
+                          key={replayUrl}
+                          src={replayUrl}
                           controls
                           autoPlay
                           playsInline
@@ -1075,16 +881,13 @@ export default function Home() {
 
                   <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
                     <h3 className="text-xl font-semibold">
-                      Delayed
-                      Live
+                      Delayed Live
                     </h3>
 
                     <p className="mt-2 text-zinc-400">
-                      Continuously
-                      watch the
-                      camera this
-                      far behind
-                      real time.
+                      Continuously watch
+                      the camera this far
+                      behind real time.
                     </p>
 
                     <div className="mt-5 text-2xl font-semibold">
@@ -1102,14 +905,10 @@ export default function Home() {
                       value={
                         delaySeconds
                       }
-                      onChange={(
-                        e
-                      ) =>
+                      onChange={(e) =>
                         setDelaySeconds(
                           Number(
-                            e
-                              .target
-                              .value
+                            e.target.value
                           )
                         )
                       }
@@ -1135,19 +934,14 @@ export default function Home() {
                         }
                         className="rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white"
                       >
-                        ▶ Start
-                        Delayed
-                        Live
+                        ▶ Start Delayed Live
                       </button>
 
                       <button
-                        onClick={
-                          goLive
-                        }
+                        onClick={goLive}
                         className="rounded-xl bg-zinc-800 px-5 py-3 font-semibold"
                       >
-                        🔴 Back
-                        to Live
+                        🔴 Back to Live
                       </button>
                     </div>
                   </section>
@@ -1158,10 +952,8 @@ export default function Home() {
                     </h3>
 
                     <p className="mt-2 text-zinc-400">
-                      Choose how
-                      far back
-                      you want
-                      to replay.
+                      Choose how far back
+                      you want to replay.
                     </p>
 
                     <div className="mt-5 text-2xl font-semibold">
@@ -1178,14 +970,10 @@ export default function Home() {
                       value={
                         replaySeconds
                       }
-                      onChange={(
-                        e
-                      ) =>
+                      onChange={(e) =>
                         setReplaySeconds(
                           Number(
-                            e
-                              .target
-                              .value
+                            e.target.value
                           )
                         )
                       }
@@ -1209,18 +997,14 @@ export default function Home() {
                         }
                         className="rounded-xl bg-white px-5 py-3 font-semibold text-black"
                       >
-                        ⏪ Load
-                        Replay
+                        ⏪ Load Replay
                       </button>
 
                       <button
-                        onClick={
-                          goLive
-                        }
+                        onClick={goLive}
                         className="rounded-xl bg-zinc-800 px-5 py-3 font-semibold"
                       >
-                        🔴 Back
-                        to Live
+                        🔴 Back to Live
                       </button>
                     </div>
 
@@ -1245,6 +1029,7 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-black text-white">
         <div className="mx-auto max-w-5xl p-6">
+
           <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
             <div>
               <h1 className="text-3xl font-bold">
@@ -1257,9 +1042,7 @@ export default function Home() {
             </div>
 
             <button
-              onClick={
-                signOut
-              }
+              onClick={signOut}
               className="rounded-xl bg-zinc-800 px-4 py-3"
             >
               Sign Out
@@ -1271,25 +1054,64 @@ export default function Home() {
               Your Gyms
             </h2>
 
+            <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+              <h3 className="text-xl font-semibold">
+                Join a Gym
+              </h3>
+
+              <p className="mt-2 text-zinc-400">
+                Enter the code provided
+                by your gym.
+              </p>
+
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                <input
+                  type="text"
+                  placeholder="Gym code"
+                  value={joinCode}
+                  onChange={(e) =>
+                    setJoinCode(
+                      e.target.value.toUpperCase()
+                    )
+                  }
+                  onKeyDown={(e) => {
+                    if (
+                      e.key === "Enter"
+                    ) {
+                      joinGym();
+                    }
+                  }}
+                  className="flex-1 rounded-xl border border-zinc-700 bg-zinc-900 p-4 uppercase"
+                />
+
+                <button
+                  onClick={joinGym}
+                  className="rounded-xl bg-white px-6 py-4 font-semibold text-black"
+                >
+                  Join Gym
+                </button>
+              </div>
+
+              {joinMessage && (
+                <p className="mt-3 text-sm text-zinc-400">
+                  {joinMessage}
+                </p>
+              )}
+            </div>
+
             {gymsLoading ? (
               <p className="mt-5 text-zinc-400">
-                Loading
-                gyms...
+                Loading gyms...
               </p>
-            ) : gyms.length ===
-              0 ? (
+            ) : gyms.length === 0 ? (
               <div className="mt-5 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
                 <h3 className="text-xl font-semibold">
-                  No gyms
-                  assigned
+                  No gyms assigned
                 </h3>
 
                 <p className="mt-2 text-zinc-400">
-                  Your account
-                  does not
-                  currently
-                  have access
-                  to a gym.
+                  Enter your gym code
+                  above to join.
                 </p>
               </div>
             ) : (
@@ -1297,34 +1119,25 @@ export default function Home() {
                 {gyms.map(
                   (gym) => (
                     <div
-                      key={
-                        gym.id
-                      }
+                      key={gym.id}
                       className="rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
                     >
                       <h3 className="text-xl font-semibold">
-                        {
-                          gym.name
-                        }
+                        {gym.name}
                       </h3>
 
                       <p className="mt-2 capitalize text-zinc-400">
                         Role:{" "}
-                        {
-                          gym.role
-                        }
+                        {gym.role}
                       </p>
 
                       <button
                         onClick={() =>
-                          openGym(
-                            gym
-                          )
+                          openGym(gym)
                         }
                         className="mt-5 rounded-xl bg-white px-5 py-3 font-semibold text-black"
                       >
-                        Open
-                        Gym
+                        Open Gym
                       </button>
                     </div>
                   )
@@ -1346,25 +1159,24 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-black text-white">
       <div className="mx-auto max-w-md p-6 pt-20">
+
         <h1 className="text-4xl font-bold">
           Gym Replay
         </h1>
 
         <p className="mt-2 text-zinc-400">
-          Sign in to
-          access your gym
-          cameras.
+          Sign in to access your gym cameras.
         </p>
 
         <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-950 p-6">
+
           <input
             type="email"
             placeholder="Email"
             value={email}
             onChange={(e) =>
               setEmail(
-                e.target
-                  .value
+                e.target.value
               )
             }
             className="w-full rounded-xl border border-zinc-700 bg-zinc-900 p-4"
@@ -1373,45 +1185,34 @@ export default function Home() {
           <input
             type="password"
             placeholder="Password"
-            value={
-              password
-            }
+            value={password}
             onChange={(e) =>
               setPassword(
-                e.target
-                  .value
+                e.target.value
               )
             }
             className="mt-3 w-full rounded-xl border border-zinc-700 bg-zinc-900 p-4"
           />
 
           <button
-            onClick={
-              signIn
-            }
+            onClick={signIn}
             className="mt-4 w-full rounded-xl bg-white p-4 font-semibold text-black"
           >
             Sign In
           </button>
 
           <button
-            onClick={
-              forgotPassword
-            }
+            onClick={forgotPassword}
             className="mt-3 w-full text-sm text-zinc-400 underline"
           >
-            Forgot
-            password?
+            Forgot password?
           </button>
 
           <button
-            onClick={
-              signUp
-            }
+            onClick={signUp}
             className="mt-3 w-full rounded-xl bg-zinc-800 p-4 font-semibold"
           >
-            Create
-            Account
+            Create Account
           </button>
 
           <p className="mt-4 text-sm text-zinc-400">
