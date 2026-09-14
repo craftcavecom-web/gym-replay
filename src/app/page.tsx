@@ -288,6 +288,8 @@ export default function Home() {
   const [replayUrl, setReplayUrl] = useState("");
   const [replayMessage, setReplayMessage] = useState("");
   const [replayLoading, setReplayLoading] = useState(false);
+  const [shareFile, setShareFile] = useState<File | null>(null);
+  const [sharePreparing, setSharePreparing] = useState(false);
 
   const [joinCode, setJoinCode] = useState("");
   const [joinMessage, setJoinMessage] = useState("");
@@ -517,7 +519,56 @@ export default function Home() {
     setJoinCode("");
     setJoinMessage("");
   }
+useEffect(() => {
+  if (!replayUrl) {
+    setShareFile(null);
+    setSharePreparing(false);
+    return;
+  }
 
+  let cancelled = false;
+
+  async function prepareShareFile() {
+    try {
+      setSharePreparing(true);
+      setShareFile(null);
+
+      const response = await fetch(replayUrl);
+
+      if (!response.ok) {
+        throw new Error("Could not prepare clip.");
+      }
+
+      const blob = await response.blob();
+
+      const file = new File(
+        [blob],
+        `gymcam-${selectedCamera?.name ?? "clip"}.mp4`,
+        { type: "video/mp4" }
+      );
+
+      if (!cancelled) {
+        setShareFile(file);
+      }
+    } catch (error) {
+      console.error("Share preparation error:", error);
+
+      if (!cancelled) {
+        setReplayMessage("Replay works, but sharing could not be prepared.");
+      }
+    } finally {
+      if (!cancelled) {
+        setSharePreparing(false);
+      }
+    }
+  }
+
+  void prepareShareFile();
+
+  return () => {
+    cancelled = true;
+  };
+}, [replayUrl, selectedCamera?.name]);
   async function loadReplay() {
       if (!selectedCamera) return;
 
@@ -540,69 +591,57 @@ export default function Home() {
       }, 1200);
     }
   async function shareReplay() {
-    if (!replayUrl) {
-      setReplayMessage("Load a replay first.");
+  if (!shareFile) {
+    setReplayMessage("Clip is still preparing. Try again in a moment.");
+    return;
+  }
+
+  try {
+    if (
+      navigator.share &&
+      navigator.canShare?.({
+        files: [shareFile],
+      })
+    ) {
+      await navigator.share({
+        files: [shareFile],
+        title: "GymCam Clip",
+      });
+
+      setReplayMessage("");
       return;
     }
 
-    try {
-      setReplayMessage("Preparing clip...");
+    const downloadUrl = URL.createObjectURL(shareFile);
 
-      const response = await fetch(replayUrl);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = shareFile.name;
 
-      if (!response.ok) {
-        throw new Error("Could not prepare clip.");
-      }
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
 
-      const blob = await response.blob();
+    URL.revokeObjectURL(downloadUrl);
 
-      const file = new File(
-        [blob],
-        `gymcam-${selectedCamera?.name ?? "clip"}.mp4`,
-        {
-          type: "video/mp4",
-        }
-      );
+    setReplayMessage(
+      "Native sharing isn't supported here, so the clip was downloaded."
+    );
+  } catch (error) {
+    const shareError = error as Error;
 
-      if (
-        navigator.share &&
-        navigator.canShare?.({
-          files: [file],
-        })
-      ) {
-        await navigator.share({
-          files: [file],
-          title: "GymCam Clip",
-        });
-
-        setReplayMessage("");
-        return;
-      }
-
-      const downloadUrl = URL.createObjectURL(blob);
-
-      const link = document.createElement("a");
-
-      link.href = downloadUrl;
-      link.download = file.name;
-
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-
-      URL.revokeObjectURL(downloadUrl);
-
-      setReplayMessage(
-        "Sharing isn't supported here, so the clip was downloaded instead."
-      );
-    } catch (error) {
-      console.error(error);
-
-      setReplayMessage(
-        "Could not share this clip."
-      );
+    if (shareError.name === "AbortError") {
+      setReplayMessage("");
+      return;
     }
+
+    console.error("Share error:", error);
+
+    setReplayMessage(
+      `Could not share this clip: ${shareError.message}`
+    );
   }
+}
 
   async function controlCameras(
     action: "start" | "stop" | "status",
@@ -979,11 +1018,12 @@ export default function Home() {
                           </button>
 
                           <button
+                            type="button"
                             onClick={shareReplay}
-                            disabled={!replayUrl}
-                            className="rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                            disabled={!shareFile || sharePreparing}
+                            className="mt-2 w-full rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                           >
-                            Share Clip
+                            {sharePreparing ? "Preparing clip…" : "Share Clip"}
                           </button>
 
                           <button
