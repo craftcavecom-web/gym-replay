@@ -518,21 +518,90 @@ export default function Home() {
     setJoinMessage("");
   }
 
-  function loadReplay() {
-    if (!selectedCamera) return;
+  async function loadReplay() {
+      if (!selectedCamera) return;
 
-    setReplayLoading(true);
-    setReplayMessage("");
-    setMode("replay");
+      setReplayMessage("");
+      setReplayLoading(true);
 
-    const path = selectedCamera.stream_path;
-    const url =
-      `${MOBILE_REPLAY_BASE}/latest` +
-      `?path=${encodeURIComponent(path)}` +
-      `&duration=${replaySeconds}` +
-      `&_=${Date.now()}`;
+      const path = selectedCamera.stream_path;
 
-    setReplayUrl(url);
+      const url =
+        `https://mobile-replay.gymcam.stream/latest` +
+        `?path=${encodeURIComponent(path)}` +
+        `&duration=${replaySeconds}` +
+        `&t=${Date.now()}`;
+
+      setReplayUrl(url);
+      setMode("replay");
+
+      setTimeout(() => {
+        setReplayLoading(false);
+      }, 1200);
+    }
+  async function shareReplay() {
+    if (!replayUrl) {
+      setReplayMessage("Load a replay first.");
+      return;
+    }
+
+    try {
+      setReplayMessage("Preparing clip...");
+
+      const response = await fetch(replayUrl);
+
+      if (!response.ok) {
+        throw new Error("Could not prepare clip.");
+      }
+
+      const blob = await response.blob();
+
+      const file = new File(
+        [blob],
+        `gymcam-${selectedCamera?.name ?? "clip"}.mp4`,
+        {
+          type: "video/mp4",
+        }
+      );
+
+      if (
+        navigator.share &&
+        navigator.canShare?.({
+          files: [file],
+        })
+      ) {
+        await navigator.share({
+          files: [file],
+          title: "GymCam Clip",
+        });
+
+        setReplayMessage("");
+        return;
+      }
+
+      const downloadUrl = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+
+      link.href = downloadUrl;
+      link.download = file.name;
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      URL.revokeObjectURL(downloadUrl);
+
+      setReplayMessage(
+        "Sharing isn't supported here, so the clip was downloaded instead."
+      );
+    } catch (error) {
+      console.error(error);
+
+      setReplayMessage(
+        "Could not share this clip."
+      );
+    }
   }
 
   async function controlCameras(
@@ -761,7 +830,7 @@ export default function Home() {
                     )}
 
                     {mode === "replay" && (
-                      <div className="overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
+                      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
                         {replayUrl ? (
                           <video
                             key={replayUrl}
@@ -774,23 +843,35 @@ export default function Home() {
                             onCanPlay={() => setReplayLoading(false)}
                             onError={() => {
                               setReplayLoading(false);
-                              setReplayMessage("Replay could not be loaded. Try a shorter clip or try again in a few seconds.");
+                              setReplayMessage(
+                                "Replay could not be loaded. Try a shorter clip or try again in a few seconds."
+                              );
                             }}
                             className="aspect-video w-full bg-black object-contain"
                           />
                         ) : (
                           <div className="flex aspect-video items-center justify-center px-6 text-center">
                             <div>
-                              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-xl">↶</div>
-                              <p className="mt-4 font-semibold">Ready for replay</p>
-                              <p className="mt-1 text-sm text-zinc-500">Choose a replay length and load the latest clip.</p>
+                              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-xl">
+                                ↶
+                              </div>
+
+                              <p className="mt-4 font-semibold">
+                                Ready for replay
+                              </p>
+
+                              <p className="mt-1 text-sm text-zinc-500">
+                                Choose a replay length and load the latest clip.
+                              </p>
                             </div>
                           </div>
                         )}
 
                         {replayLoading && replayUrl && (
-                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/50 text-sm text-zinc-300">
-                            Preparing replay…
+                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                            <div className="rounded-full border border-white/10 bg-zinc-900/90 px-5 py-3 text-sm font-medium text-zinc-200">
+                              Preparing replay…
+                            </div>
                           </div>
                         )}
                       </div>
@@ -895,6 +976,14 @@ export default function Home() {
                             className="mt-5 w-full rounded-xl bg-white px-4 py-3 text-sm font-bold text-black transition hover:bg-zinc-200"
                           >
                             Load latest replay
+                          </button>
+
+                          <button
+                            onClick={shareReplay}
+                            disabled={!replayUrl}
+                            className="rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            Share Clip
                           </button>
 
                           <button
