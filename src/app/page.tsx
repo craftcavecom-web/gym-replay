@@ -51,8 +51,8 @@ function isMobileShareDevice() {
 
 function BrandMark() {
   return (
-    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-lg font-black text-black shadow-lg shadow-white/10">
-      G
+    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-500 shadow-lg shadow-blue-500/20">
+      <span className="text-xl font-black text-white">↻</span>
     </div>
   );
 }
@@ -547,7 +547,8 @@ export default function Home() {
         setSharePreparing(true);
         setShareFile(null);
 
-        const response = await fetch(replayUrl, { cache: "no-store" });
+        const exportUrl = replayUrl.replace("/latest", "/export");
+        const response = await fetch(exportUrl);
 
         if (!response.ok) {
           throw new Error(`Replay fetch failed with ${response.status}`);
