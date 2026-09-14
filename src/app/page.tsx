@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { supabase } from "./lib/supabase";
+import ReplayPlayer from "./ReplayPlayer";
+
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
 const HLS_BASE = "https://live.gymcam.stream";
@@ -994,17 +996,12 @@ export default function Home() {
                       />
                     )}
 
-                    {mode === "replay" &&
-                      replayUrl && (
-                        <video
-                          key={replayUrl}
-                          src={replayUrl}
-                          controls
-                          autoPlay
-                          playsInline
-                          className="h-[500px] w-full rounded-xl bg-black"
-                        />
-                      )}
+                   {mode === "replay" && replayUrl && (
+                    <ReplayPlayer
+                      key={replayUrl}
+                      url={replayUrl}
+                    />
+                  )}
                   </section>
 
                   <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
