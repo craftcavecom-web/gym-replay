@@ -40,6 +40,15 @@ function formatTime(seconds: number) {
   return remaining === 0 ? `${minutes}m` : `${minutes}m ${remaining}s`;
 }
 
+function isMobileShareDevice() {
+  if (typeof navigator === "undefined") return false;
+
+  const mobileUserAgent = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const iPadDesktopMode = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+
+  return mobileUserAgent || iPadDesktopMode;
+}
+
 function BrandMark() {
   return (
     <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-lg font-black text-black shadow-lg shadow-white/10">
@@ -290,6 +299,7 @@ export default function Home() {
   const [replayLoading, setReplayLoading] = useState(false);
   const [shareFile, setShareFile] = useState<File | null>(null);
   const [sharePreparing, setSharePreparing] = useState(false);
+  const [nativeShareAvailable, setNativeShareAvailable] = useState(false);
 
   const [joinCode, setJoinCode] = useState("");
   const [joinMessage, setJoinMessage] = useState("");
@@ -311,6 +321,10 @@ export default function Home() {
     });
 
     return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    setNativeShareAvailable(isMobileShareDevice() && typeof navigator.share === "function");
   }, []);
 
   useEffect(() => {
@@ -519,129 +533,134 @@ export default function Home() {
     setJoinCode("");
     setJoinMessage("");
   }
-useEffect(() => {
-  if (!replayUrl) {
-    setShareFile(null);
-    setSharePreparing(false);
-    return;
-  }
-
-  let cancelled = false;
-
-  async function prepareShareFile() {
-    try {
-      setSharePreparing(true);
+  useEffect(() => {
+    if (!replayUrl) {
       setShareFile(null);
-
-      const response = await fetch(replayUrl);
-
-      if (!response.ok) {
-        throw new Error("Could not prepare clip.");
-      }
-
-      const blob = await response.blob();
-
-      const file = new File(
-        [blob],
-        `gymcam-${selectedCamera?.name ?? "clip"}.mp4`,
-        { type: "video/mp4" }
-      );
-
-      if (!cancelled) {
-        setShareFile(file);
-      }
-    } catch (error) {
-      console.error("Share preparation error:", error);
-
-      if (!cancelled) {
-        setReplayMessage("Replay works, but sharing could not be prepared.");
-      }
-    } finally {
-      if (!cancelled) {
-        setSharePreparing(false);
-      }
-    }
-  }
-
-  void prepareShareFile();
-
-  return () => {
-    cancelled = true;
-  };
-}, [replayUrl, selectedCamera?.name]);
-  async function loadReplay() {
-      if (!selectedCamera) return;
-
-      setReplayMessage("");
-      setReplayLoading(true);
-
-      const path = selectedCamera.stream_path;
-
-      const url =
-        `https://mobile-replay.gymcam.stream/latest` +
-        `?path=${encodeURIComponent(path)}` +
-        `&duration=${replaySeconds}` +
-        `&t=${Date.now()}`;
-
-      setReplayUrl(url);
-      setMode("replay");
-
-      setTimeout(() => {
-        setReplayLoading(false);
-      }, 1200);
-    }
-  async function shareReplay() {
-  if (!shareFile) {
-    setReplayMessage("Clip is still preparing. Try again in a moment.");
-    return;
-  }
-
-  try {
-    if (
-      navigator.share &&
-      navigator.canShare?.({
-        files: [shareFile],
-      })
-    ) {
-      await navigator.share({
-        files: [shareFile],
-        title: "GymCam Clip",
-      });
-
-      setReplayMessage("");
+      setSharePreparing(false);
       return;
     }
 
-    const downloadUrl = URL.createObjectURL(shareFile);
+    let cancelled = false;
 
+    async function prepareShareFile() {
+      try {
+        setSharePreparing(true);
+        setShareFile(null);
+
+        const response = await fetch(replayUrl, { cache: "no-store" });
+
+        if (!response.ok) {
+          throw new Error(`Replay fetch failed with ${response.status}`);
+        }
+
+        const blob = await response.blob();
+
+        if (!blob.size) {
+          throw new Error("Replay file was empty.");
+        }
+
+        const safeCameraName = (selectedCamera?.name ?? "clip")
+          .replace(/[^a-z0-9-_]+/gi, "-")
+          .replace(/^-+|-+$/g, "") || "clip";
+
+        const file = new File(
+          [blob],
+          `gymcam-${safeCameraName}.mp4`,
+          { type: "video/mp4" },
+        );
+
+        if (!cancelled) {
+          setShareFile(file);
+        }
+      } catch (error) {
+        console.error("Share preparation error:", error);
+
+        if (!cancelled) {
+          setShareFile(null);
+          setReplayMessage("Replay works, but the clip could not be prepared for sharing yet.");
+        }
+      } finally {
+        if (!cancelled) {
+          setSharePreparing(false);
+        }
+      }
+    }
+
+    void prepareShareFile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [replayUrl, selectedCamera?.name]);
+
+  async function loadReplay() {
+    if (!selectedCamera) return;
+
+    setReplayMessage("");
+    setReplayLoading(true);
+    setShareFile(null);
+
+    const path = selectedCamera.stream_path;
+
+    const url =
+      `${MOBILE_REPLAY_BASE}/latest` +
+      `?path=${encodeURIComponent(path)}` +
+      `&duration=${replaySeconds}` +
+      `&t=${Date.now()}`;
+
+    setReplayUrl(url);
+    setMode("replay");
+  }
+
+  function downloadClip(file: File) {
+    const downloadUrl = URL.createObjectURL(file);
     const link = document.createElement("a");
+
     link.href = downloadUrl;
-    link.download = shareFile.name;
+    link.download = file.name;
+    link.style.display = "none";
 
     document.body.appendChild(link);
     link.click();
     link.remove();
 
-    URL.revokeObjectURL(downloadUrl);
+    window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+  }
 
-    setReplayMessage(
-      "Native sharing isn't supported here, so the clip was downloaded."
-    );
-  } catch (error) {
-    const shareError = error as Error;
-
-    if (shareError.name === "AbortError") {
-      setReplayMessage("");
+  async function shareReplay() {
+    if (!shareFile) {
+      setReplayMessage("Clip is still preparing. Try again in a moment.");
       return;
     }
 
-    console.error("Share error:", error);
+    setReplayMessage("");
 
-    setReplayMessage(
-      `Could not share this clip: ${shareError.message}`
-    );
+    const canShareFile =
+      nativeShareAvailable &&
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({ files: [shareFile] });
+
+    if (!canShareFile) {
+      downloadClip(shareFile);
+      return;
+    }
+
+    try {
+      await navigator.share({
+        files: [shareFile],
+        title: "GymCam Clip",
+      });
+    } catch (error) {
+      const shareError = error as Error;
+
+      if (shareError.name === "AbortError") {
+        return;
+      }
+
+      console.error("Native share failed, saving clip instead:", error);
+      downloadClip(shareFile);
+    }
   }
-}
 
   async function controlCameras(
     action: "start" | "stop" | "status",
@@ -1023,7 +1042,11 @@ useEffect(() => {
                             disabled={!shareFile || sharePreparing}
                             className="mt-2 w-full rounded-xl bg-blue-500 px-5 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
                           >
-                            {sharePreparing ? "Preparing clip…" : "Share Clip"}
+                            {sharePreparing
+                              ? "Preparing clip…"
+                              : nativeShareAvailable
+                                ? "Share Clip"
+                                : "Save Clip"}
                           </button>
 
                           <button
