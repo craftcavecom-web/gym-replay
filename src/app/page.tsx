@@ -283,6 +283,12 @@ export default function Home() {
   const [joinMessage, setJoinMessage] =
     useState("");
 
+  const [cameraControlStatus, setCameraControlStatus] =
+  useState("unknown");
+
+  const [cameraControlMessage, setCameraControlMessage] =
+    useState("");
+
   useEffect(() => {
     checkUser();
 
@@ -744,7 +750,70 @@ export default function Home() {
       );
     }
   }
+    async function controlCameras(
+    action: "start" | "stop" | "status"
+  ) {
+    try {
+      setCameraControlMessage(
+        action === "start"
+          ? "Starting cameras..."
+          : action === "stop"
+          ? "Stopping cameras..."
+          : "Checking status..."
+      );
 
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
+        setCameraControlMessage("Not signed in.");
+        return;
+      }
+
+      const response = await fetch(
+        "/api/camera-control",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({
+            action,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setCameraControlMessage(
+          data.error ?? "Camera control failed."
+        );
+        return;
+      }
+
+      const status =
+        data.status ?? "unknown";
+
+      setCameraControlStatus(status);
+
+      if (action === "start") {
+        setCameraControlMessage("Cameras are on.");
+      } else if (action === "stop") {
+        setCameraControlMessage("Cameras are off.");
+      } else {
+        setCameraControlMessage("");
+      }
+    } catch (error) {
+      console.error(error);
+      setCameraControlMessage(
+        "Could not contact camera system."
+      );
+    }
+  }
+  
   function goLive() {
     setMode("live");
     setReplayUrl("");
@@ -779,6 +848,65 @@ export default function Home() {
               Back
             </button>
           </div>
+          {selectedGym.role === "admin" && (
+            <section className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold">
+                    Camera Control
+                  </h2>
+
+                  <p className="mt-1 text-sm text-zinc-400">
+                    Status:{" "}
+                    <span
+                      className={
+                        cameraControlStatus === "active"
+                          ? "text-green-400"
+                          : "text-zinc-400"
+                      }
+                    >
+                      {cameraControlStatus}
+                    </span>
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={() =>
+                      controlCameras("start")
+                    }
+                    className="rounded-xl bg-green-600 px-5 py-3 font-semibold text-white"
+                  >
+                    ▶ Start Cameras
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      controlCameras("stop")
+                    }
+                    className="rounded-xl bg-red-600 px-5 py-3 font-semibold text-white"
+                  >
+                    ■ Stop Cameras
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      controlCameras("status")
+                    }
+                    className="rounded-xl bg-zinc-800 px-5 py-3 font-semibold"
+                  >
+                    Refresh Status
+                  </button>
+                </div>
+              </div>
+
+              {cameraControlMessage && (
+                <p className="mt-3 text-sm text-zinc-400">
+                  {cameraControlMessage}
+                </p>
+              )}
+            </section>
+          )}
 
           {camerasLoading ? (
             <p className="mt-8 text-zinc-400">
