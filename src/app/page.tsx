@@ -658,6 +658,7 @@ export default function Home() {
 
     if (!canShareFile) {
       downloadClip(shareFile);
+      await logExport();
       return;
     }
 
@@ -678,6 +679,7 @@ export default function Home() {
 
       console.error("Native share failed, saving clip instead:", error);
       downloadClip(shareFile);
+      await logExport();
     }
   }
 
@@ -815,6 +817,16 @@ export default function Home() {
                     className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     Stop system
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      window.location.href = `/admin/clip-history?gym=${selectedGym.id}`;
+                    }}
+                    className="col-span-2 rounded-xl border border-blue-400/20 bg-blue-500/10 px-4 py-2.5 text-sm font-semibold text-blue-200 transition hover:bg-blue-500/15 sm:col-auto"
+                  >
+                    Clip History
                   </button>
                 </div>
               </div>
