@@ -14,6 +14,11 @@ type ExportLog = {
   created_at: string;
 };
 
+type ExportUser = {
+  email: string;
+  name: string | null;
+};
+
 type Camera = {
   id: string;
   name: string;
@@ -60,7 +65,11 @@ function statusLabel(status: string) {
 }
 
 function statusClasses(status: string) {
-  if (status === "delivery_started" || status === "shared" || status === "saved") {
+  if (
+    status === "delivery_started" ||
+    status === "shared" ||
+    status === "saved"
+  ) {
     return "border-emerald-500/20 bg-emerald-500/10 text-emerald-300";
   }
 
@@ -75,10 +84,27 @@ function statusClasses(status: string) {
   return "border-white/10 bg-white/[0.05] text-zinc-300";
 }
 
+function accountLabel(
+  userId: string | null,
+  exportUsers: Record<string, ExportUser>,
+) {
+  if (!userId) return "Unknown";
+
+  return (
+    exportUsers[userId]?.name ||
+    exportUsers[userId]?.email ||
+    shortUserId(userId)
+  );
+}
+
 export default function ClipHistoryPage() {
   const [gymId, setGymId] = useState("");
   const [gymName, setGymName] = useState("Gym");
   const [userEmail, setUserEmail] = useState("");
+
+  const [exportUsers, setExportUsers] = useState<
+    Record<string, ExportUser>
+  >({});
 
   const [logs, setLogs] = useState<ExportLog[]>([]);
   const [cameras, setCameras] = useState<Camera[]>([]);
@@ -89,6 +115,7 @@ export default function ClipHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [userLookupWarning, setUserLookupWarning] = useState("");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -104,9 +131,65 @@ export default function ClipHistoryPage() {
     void loadHistory(requestedGymId, false);
   }, []);
 
-  async function loadHistory(currentGymId: string, isRefresh: boolean) {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+  async function loadExportUsers(currentGymId: string) {
+    try {
+      setUserLookupWarning("");
+
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      if (!session) {
+        setExportUsers({});
+        return;
+      }
+
+      const response = await fetch(
+        `/api/admin/export-users?gym=${encodeURIComponent(currentGymId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${session.access_token}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        console.warn(
+          "Could not load export user names:",
+          response.status,
+        );
+
+        setExportUsers({});
+        setUserLookupWarning(
+          "Account names could not be loaded. User IDs are shown instead.",
+        );
+        return;
+      }
+
+      const data = await response.json();
+
+      setExportUsers(
+        (data.users ?? {}) as Record<string, ExportUser>,
+      );
+    } catch (lookupError) {
+      console.warn("Export user lookup failed:", lookupError);
+
+      setExportUsers({});
+      setUserLookupWarning(
+        "Account names could not be loaded. User IDs are shown instead.",
+      );
+    }
+  }
+
+  async function loadHistory(
+    currentGymId: string,
+    isRefresh: boolean,
+  ) {
+    if (isRefresh) {
+      setRefreshing(true);
+    } else {
+      setLoading(true);
+    }
 
     setError("");
 
@@ -123,12 +206,13 @@ export default function ClipHistoryPage() {
 
       setUserEmail(user.email ?? "");
 
-      const { data: access, error: accessError } = await supabase
-        .from("user_gym_access")
-        .select("role")
-        .eq("user_id", user.id)
-        .eq("gym_id", currentGymId)
-        .maybeSingle();
+      const { data: access, error: accessError } =
+        await supabase
+          .from("user_gym_access")
+          .select("role")
+          .eq("user_id", user.id)
+          .eq("gym_id", currentGymId)
+          .maybeSingle();
 
       if (accessError) {
         throw accessError;
@@ -139,28 +223,29 @@ export default function ClipHistoryPage() {
         return;
       }
 
-      const [gymResult, cameraResult, logResult] = await Promise.all([
-        supabase
-          .from("gyms")
-          .select("name")
-          .eq("id", currentGymId)
-          .maybeSingle(),
+      const [gymResult, cameraResult, logResult] =
+        await Promise.all([
+          supabase
+            .from("gyms")
+            .select("name")
+            .eq("id", currentGymId)
+            .maybeSingle(),
 
-        supabase
-          .from("cameras")
-          .select("id, name")
-          .eq("gym_id", currentGymId)
-          .order("name", { ascending: true }),
+          supabase
+            .from("cameras")
+            .select("id, name")
+            .eq("gym_id", currentGymId)
+            .order("name", { ascending: true }),
 
-        supabase
-          .from("video_downloads")
-          .select(
-            "id, gym_id, camera_id, user_id, clip_seconds, watermark_id, status, created_at",
-          )
-          .eq("gym_id", currentGymId)
-          .order("created_at", { ascending: false })
-          .limit(500),
-      ]);
+          supabase
+            .from("video_downloads")
+            .select(
+              "id, gym_id, camera_id, user_id, clip_seconds, watermark_id, status, created_at",
+            )
+            .eq("gym_id", currentGymId)
+            .order("created_at", { ascending: false })
+            .limit(500),
+        ]);
 
       if (gymResult.error) throw gymResult.error;
       if (cameraResult.error) throw cameraResult.error;
@@ -169,6 +254,10 @@ export default function ClipHistoryPage() {
       setGymName(gymResult.data?.name ?? "Gym");
       setCameras((cameraResult.data ?? []) as Camera[]);
       setLogs((logResult.data ?? []) as ExportLog[]);
+
+      // Important: account/email lookup is optional.
+      // If it fails, the page still loads and falls back to user IDs.
+      void loadExportUsers(currentGymId);
     } catch (caughtError) {
       console.error("Could not load clip history:", caughtError);
       setError("Could not load clip history.");
@@ -204,12 +293,18 @@ export default function ClipHistoryPage() {
     const today = new Date().toDateString();
 
     return logs.filter(
-      (log) => new Date(log.created_at).toDateString() === today,
+      (log) =>
+        new Date(log.created_at).toDateString() === today,
     ).length;
   }, [logs]);
 
   const totalClipSeconds = useMemo(
-    () => logs.reduce((total, log) => total + (log.clip_seconds || 0), 0),
+    () =>
+      logs.reduce(
+        (total, log) =>
+          total + (Number(log.clip_seconds) || 0),
+        0,
+      ),
     [logs],
   );
 
@@ -218,7 +313,9 @@ export default function ClipHistoryPage() {
       <main className="flex min-h-screen items-center justify-center bg-[#070707] text-white">
         <div className="text-center">
           <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-700 border-t-white" />
-          <p className="mt-4 text-sm text-zinc-500">Loading clip history…</p>
+          <p className="mt-4 text-sm text-zinc-500">
+            Loading clip history…
+          </p>
         </div>
       </main>
     );
@@ -255,7 +352,9 @@ export default function ClipHistoryPage() {
                 </span>
               </div>
 
-              <p className="truncate text-xs text-zinc-500">{gymName}</p>
+              <p className="truncate text-xs text-zinc-500">
+                {gymName}
+              </p>
             </div>
           </div>
 
@@ -288,34 +387,51 @@ export default function ClipHistoryPage() {
         ) : (
           <>
             <section>
-              <p className="text-sm font-medium text-zinc-500">Admin</p>
+              <p className="text-sm font-medium text-zinc-500">
+                Admin
+              </p>
+
               <h2 className="mt-1 text-3xl font-bold tracking-tight sm:text-4xl">
                 Export activity
               </h2>
+
               <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-500">
                 See when clips from {gymName} were shared or saved.
               </p>
             </section>
+
+            {userLookupWarning && (
+              <div className="mt-5 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] px-4 py-3 text-sm text-amber-200">
+                {userLookupWarning}
+              </div>
+            )}
 
             <section className="mt-6 grid gap-3 sm:grid-cols-3">
               <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-5">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-600">
                   Total exports
                 </p>
-                <p className="mt-2 text-3xl font-bold">{logs.length}</p>
+
+                <p className="mt-2 text-3xl font-bold">
+                  {logs.length}
+                </p>
               </div>
 
               <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-5">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-600">
                   Today
                 </p>
-                <p className="mt-2 text-3xl font-bold">{todayCount}</p>
+
+                <p className="mt-2 text-3xl font-bold">
+                  {todayCount}
+                </p>
               </div>
 
               <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] p-5">
                 <p className="text-xs font-semibold uppercase tracking-wider text-zinc-600">
                   Clip time
                 </p>
+
                 <p className="mt-2 text-3xl font-bold">
                   {formatDuration(totalClipSeconds)}
                 </p>
@@ -331,13 +447,18 @@ export default function ClipHistoryPage() {
 
                   <select
                     value={cameraFilter}
-                    onChange={(event) => setCameraFilter(event.target.value)}
+                    onChange={(event) =>
+                      setCameraFilter(event.target.value)
+                    }
                     className="w-full rounded-xl border border-white/10 bg-[#111] px-4 py-3 text-sm text-white outline-none"
                   >
                     <option value="all">All cameras</option>
 
                     {cameras.map((camera) => (
-                      <option key={camera.id} value={camera.id}>
+                      <option
+                        key={camera.id}
+                        value={camera.id}
+                      >
                         {camera.name}
                       </option>
                     ))}
@@ -351,13 +472,18 @@ export default function ClipHistoryPage() {
 
                   <select
                     value={statusFilter}
-                    onChange={(event) => setStatusFilter(event.target.value)}
+                    onChange={(event) =>
+                      setStatusFilter(event.target.value)
+                    }
                     className="w-full rounded-xl border border-white/10 bg-[#111] px-4 py-3 text-sm text-white outline-none"
                   >
                     <option value="all">All statuses</option>
 
                     {statuses.map((status) => (
-                      <option key={status} value={status}>
+                      <option
+                        key={status}
+                        value={status}
+                      >
                         {statusLabel(status)}
                       </option>
                     ))}
@@ -369,8 +495,12 @@ export default function ClipHistoryPage() {
             <section className="mt-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h3 className="font-bold">Activity</h3>
+
                 <p className="text-xs text-zinc-600">
-                  {filteredLogs.length} {filteredLogs.length === 1 ? "clip" : "clips"}
+                  {filteredLogs.length}{" "}
+                  {filteredLogs.length === 1
+                    ? "clip"
+                    : "clips"}
                 </p>
               </div>
 
@@ -379,7 +509,11 @@ export default function ClipHistoryPage() {
                   <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.06] text-xl">
                     ↗
                   </div>
-                  <h4 className="mt-4 font-bold">No clip activity yet</h4>
+
+                  <h4 className="mt-4 font-bold">
+                    No clip activity yet
+                  </h4>
+
                   <p className="mt-2 text-sm text-zinc-500">
                     Shared and saved clips will appear here.
                   </p>
@@ -396,9 +530,12 @@ export default function ClipHistoryPage() {
                           <div>
                             <p className="font-semibold">
                               {log.camera_id
-                                ? cameraNameMap.get(log.camera_id) ?? "Camera"
+                                ? cameraNameMap.get(
+                                    log.camera_id,
+                                  ) ?? "Camera"
                                 : "Unknown camera"}
                             </p>
+
                             <p className="mt-1 text-xs text-zinc-500">
                               {formatDate(log.created_at)}
                             </p>
@@ -418,8 +555,11 @@ export default function ClipHistoryPage() {
                             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
                               Clip
                             </p>
+
                             <p className="mt-1 text-sm font-semibold">
-                              {formatDuration(log.clip_seconds)}
+                              {formatDuration(
+                                log.clip_seconds,
+                              )}
                             </p>
                           </div>
 
@@ -427,11 +567,21 @@ export default function ClipHistoryPage() {
                             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
                               Account
                             </p>
+
                             <p
-                              className="mt-1 truncate font-mono text-xs text-zinc-300"
-                              title={log.user_id ?? ""}
+                              className="mt-1 truncate text-xs text-zinc-300"
+                              title={
+                                log.user_id
+                                  ? exportUsers[log.user_id]
+                                      ?.email ??
+                                    log.user_id
+                                  : ""
+                              }
                             >
-                              {shortUserId(log.user_id)}
+                              {accountLabel(
+                                log.user_id,
+                                exportUsers,
+                              )}
                             </p>
                           </div>
                         </div>
@@ -444,11 +594,21 @@ export default function ClipHistoryPage() {
                       <table className="w-full min-w-[760px] text-left">
                         <thead className="border-b border-white/[0.08] bg-white/[0.035] text-[11px] uppercase tracking-wider text-zinc-600">
                           <tr>
-                            <th className="px-5 py-4 font-semibold">Time</th>
-                            <th className="px-5 py-4 font-semibold">Camera</th>
-                            <th className="px-5 py-4 font-semibold">Clip</th>
-                            <th className="px-5 py-4 font-semibold">Account</th>
-                            <th className="px-5 py-4 font-semibold">Status</th>
+                            <th className="px-5 py-4 font-semibold">
+                              Time
+                            </th>
+                            <th className="px-5 py-4 font-semibold">
+                              Camera
+                            </th>
+                            <th className="px-5 py-4 font-semibold">
+                              Clip
+                            </th>
+                            <th className="px-5 py-4 font-semibold">
+                              Account
+                            </th>
+                            <th className="px-5 py-4 font-semibold">
+                              Status
+                            </th>
                           </tr>
                         </thead>
 
@@ -459,24 +619,40 @@ export default function ClipHistoryPage() {
                               className="bg-white/[0.02] transition hover:bg-white/[0.04]"
                             >
                               <td className="whitespace-nowrap px-5 py-4 text-sm text-zinc-400">
-                                {formatDate(log.created_at)}
+                                {formatDate(
+                                  log.created_at,
+                                )}
                               </td>
 
                               <td className="px-5 py-4 text-sm font-semibold text-white">
                                 {log.camera_id
-                                  ? cameraNameMap.get(log.camera_id) ?? "Camera"
+                                  ? cameraNameMap.get(
+                                      log.camera_id,
+                                    ) ?? "Camera"
                                   : "Unknown camera"}
                               </td>
 
                               <td className="px-5 py-4 text-sm text-zinc-300">
-                                {formatDuration(log.clip_seconds)}
+                                {formatDuration(
+                                  log.clip_seconds,
+                                )}
                               </td>
 
                               <td
-                                className="px-5 py-4 font-mono text-xs text-zinc-400"
-                                title={log.user_id ?? ""}
+                                className="px-5 py-4 text-xs text-zinc-400"
+                                title={
+                                  log.user_id
+                                    ? exportUsers[
+                                        log.user_id
+                                      ]?.email ??
+                                      log.user_id
+                                    : ""
+                                }
                               >
-                                {shortUserId(log.user_id)}
+                                {accountLabel(
+                                  log.user_id,
+                                  exportUsers,
+                                )}
                               </td>
 
                               <td className="px-5 py-4">
@@ -485,7 +661,9 @@ export default function ClipHistoryPage() {
                                     log.status,
                                   )}`}
                                 >
-                                  {statusLabel(log.status)}
+                                  {statusLabel(
+                                    log.status,
+                                  )}
                                 </span>
                               </td>
                             </tr>
