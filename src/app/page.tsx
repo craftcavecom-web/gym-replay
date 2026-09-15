@@ -628,6 +628,21 @@ export default function Home() {
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
   }
 
+  async function logExport() {
+    if (!selectedGym || !selectedCamera) return;
+
+    const { error } = await supabase.rpc("log_video_export", {
+      p_gym_id: selectedGym.id,
+      p_camera_id: selectedCamera.id,
+      p_clip_seconds: replaySeconds,
+      p_status: "delivery_started",
+    });
+
+    if (error) {
+      console.warn("Could not log export:", error);
+    }
+  }
+
   async function shareReplay() {
     if (!shareFile) {
       setReplayMessage("Clip is still preparing. Try again in a moment.");
@@ -651,6 +666,9 @@ export default function Home() {
         files: [shareFile],
         title: "GymCam Clip",
       });
+
+      await logExport();
+
     } catch (error) {
       const shareError = error as Error;
 
