@@ -9,6 +9,7 @@ const HLS_BASE = "https://live.gymcam.stream";
 const MOBILE_REPLAY_BASE = "https://mobile-replay.gymcam.stream";
 
 type VideoMode = "live" | "delay" | "replay";
+type ExportFormat = "landscape" | "vertical";
 
 type Gym = {
   id: string;
@@ -300,6 +301,7 @@ export default function Home() {
   const [shareFile, setShareFile] = useState<File | null>(null);
   const [sharePreparing, setSharePreparing] = useState(false);
   const [nativeShareAvailable, setNativeShareAvailable] = useState(false);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("landscape");
 
   const [joinCode, setJoinCode] = useState("");
   const [joinMessage, setJoinMessage] = useState("");
@@ -547,8 +549,10 @@ export default function Home() {
         setSharePreparing(true);
         setShareFile(null);
 
-        const exportUrl = replayUrl.replace("/latest", "/export");
-        const response = await fetch(exportUrl);
+        const exportUrl = new URL(replayUrl.replace("/latest", "/export"));
+        exportUrl.searchParams.set("format", exportFormat);
+
+        const response = await fetch(exportUrl.toString());
 
         if (!response.ok) {
           throw new Error(`Replay fetch failed with ${response.status}`);
@@ -564,9 +568,11 @@ export default function Home() {
           .replace(/[^a-z0-9-_]+/gi, "-")
           .replace(/^-+|-+$/g, "") || "clip";
 
+        const formatSuffix = exportFormat === "vertical" ? "-vertical" : "";
+
         const file = new File(
           [blob],
-          `gymcam-${safeCameraName}.mp4`,
+          `gymcam-${safeCameraName}${formatSuffix}.mp4`,
           { type: "video/mp4" },
         );
 
@@ -592,7 +598,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [replayUrl, selectedCamera?.name]);
+  }, [replayUrl, selectedCamera?.name, exportFormat]);
 
   async function loadReplay() {
     if (!selectedCamera) return;
@@ -628,18 +634,21 @@ export default function Home() {
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
   }
 
-  async function logExport() {
+  async function logExport(status: "shared" | "saved") {
     if (!selectedGym || !selectedCamera) return;
 
     const { error } = await supabase.rpc("log_video_export", {
       p_gym_id: selectedGym.id,
       p_camera_id: selectedCamera.id,
       p_clip_seconds: replaySeconds,
-      p_status: "delivery_started",
+      p_status: status,
     });
 
     if (error) {
       console.warn("Could not log export:", error);
+      setReplayMessage(
+        "Clip was delivered, but GymCam could not add it to Clip History.",
+      );
     }
   }
 
@@ -658,7 +667,7 @@ export default function Home() {
 
     if (!canShareFile) {
       downloadClip(shareFile);
-      await logExport();
+      await logExport("saved");
       return;
     }
 
@@ -668,8 +677,7 @@ export default function Home() {
         title: "GymCam Clip",
       });
 
-      await logExport();
-
+      await logExport("shared");
     } catch (error) {
       const shareError = error as Error;
 
@@ -679,7 +687,7 @@ export default function Home() {
 
       console.error("Native share failed, saving clip instead:", error);
       downloadClip(shareFile);
-      await logExport();
+      await logExport("saved");
     }
   }
 
@@ -1058,6 +1066,47 @@ export default function Home() {
                           </div>
 
                           <TimeControls value={replaySeconds} min={10} onChange={setReplaySeconds} />
+
+                          <div className="mt-5">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <p className="text-xs font-semibold uppercase tracking-wider text-zinc-600">
+                                Export format
+                              </p>
+                              <span className="text-[11px] text-zinc-600">
+                                {exportFormat === "vertical" ? "9:16" : "16:9"}
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2 rounded-xl border border-white/[0.08] bg-black/20 p-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setExportFormat("landscape")}
+                                className={`rounded-lg px-3 py-2.5 text-xs font-semibold transition ${
+                                  exportFormat === "landscape"
+                                    ? "bg-white text-black"
+                                    : "text-zinc-400 hover:bg-white/[0.06] hover:text-white"
+                                }`}
+                              >
+                                Landscape 16:9
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setExportFormat("vertical")}
+                                className={`rounded-lg px-3 py-2.5 text-xs font-semibold transition ${
+                                  exportFormat === "vertical"
+                                    ? "bg-white text-black"
+                                    : "text-zinc-400 hover:bg-white/[0.06] hover:text-white"
+                                }`}
+                              >
+                                Vertical 9:16
+                              </button>
+                            </div>
+
+                            <p className="mt-2 text-[11px] leading-5 text-zinc-600">
+                              Vertical keeps the camera recording landscape and center-crops the exported clip for Reels, TikTok, and Shorts.
+                            </p>
+                          </div>
 
                           <button
                             type="button"
