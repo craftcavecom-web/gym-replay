@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { supabase } from "./lib/supabase";
+import { supabase } from "../../lib/supabase";
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
 const HLS_BASE = "https://live.gymcam.stream";
@@ -302,6 +302,9 @@ export default function Home() {
   const [sharePreparing, setSharePreparing] = useState(false);
   const [nativeShareAvailable, setNativeShareAvailable] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("landscape");
+  const [cropX, setCropX] = useState(0.5);
+  const [cropY, setCropY] = useState(0.5);
+  const [cropZoom, setCropZoom] = useState(1);
 
   const [joinCode, setJoinCode] = useState("");
   const [joinMessage, setJoinMessage] = useState("");
@@ -551,6 +554,9 @@ export default function Home() {
 
         const exportUrl = new URL(replayUrl.replace("/latest", "/export"));
         exportUrl.searchParams.set("format", exportFormat);
+        exportUrl.searchParams.set("cropX", cropX.toFixed(3));
+        exportUrl.searchParams.set("cropY", cropY.toFixed(3));
+        exportUrl.searchParams.set("zoom", cropZoom.toFixed(2));
 
         const response = await fetch(exportUrl.toString());
 
@@ -598,7 +604,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [replayUrl, selectedCamera?.name, exportFormat]);
+  }, [replayUrl, selectedCamera?.name, exportFormat, cropX, cropY, cropZoom]);
 
   async function loadReplay() {
     if (!selectedCamera) return;
@@ -1104,8 +1110,80 @@ export default function Home() {
                             </div>
 
                             <p className="mt-2 text-[11px] leading-5 text-zinc-600">
-                              Vertical keeps the camera recording landscape and center-crops the exported clip for Reels, TikTok, and Shorts.
+                              Vertical keeps the camera recording landscape and crops the export for Reels, TikTok, and Shorts.
                             </p>
+
+                            {exportFormat === "vertical" && (
+                              <div className="mt-4 rounded-xl border border-white/[0.08] bg-black/20 p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div>
+                                    <p className="text-xs font-semibold text-zinc-300">Crop position</p>
+                                    <p className="mt-1 text-[11px] leading-5 text-zinc-600">
+                                      Move the 9:16 crop and zoom until the gymnast is framed correctly.
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setCropX(0.5);
+                                      setCropY(0.5);
+                                      setCropZoom(1);
+                                    }}
+                                    className="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 transition hover:bg-white/[0.08] hover:text-white"
+                                  >
+                                    Reset
+                                  </button>
+                                </div>
+
+                                <label className="mt-4 block">
+                                  <div className="mb-2 flex items-center justify-between text-[11px]">
+                                    <span className="text-zinc-500">Left ↔ Right</span>
+                                    <span className="font-semibold text-zinc-300">{Math.round(cropX * 100)}%</span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    value={Math.round(cropX * 100)}
+                                    onChange={(event) => setCropX(Number(event.target.value) / 100)}
+                                    className="w-full accent-blue-500"
+                                  />
+                                </label>
+
+                                <label className="mt-4 block">
+                                  <div className="mb-2 flex items-center justify-between text-[11px]">
+                                    <span className="text-zinc-500">Up ↕ Down</span>
+                                    <span className="font-semibold text-zinc-300">{Math.round(cropY * 100)}%</span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min="0"
+                                    max="100"
+                                    step="1"
+                                    value={Math.round(cropY * 100)}
+                                    onChange={(event) => setCropY(Number(event.target.value) / 100)}
+                                    className="w-full accent-blue-500"
+                                  />
+                                </label>
+
+                                <label className="mt-4 block">
+                                  <div className="mb-2 flex items-center justify-between text-[11px]">
+                                    <span className="text-zinc-500">Zoom</span>
+                                    <span className="font-semibold text-zinc-300">{cropZoom.toFixed(2)}×</span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min="1"
+                                    max="2"
+                                    step="0.05"
+                                    value={cropZoom}
+                                    onChange={(event) => setCropZoom(Number(event.target.value))}
+                                    className="w-full accent-blue-500"
+                                  />
+                                </label>
+                              </div>
+                            )}
                           </div>
 
                           <button
