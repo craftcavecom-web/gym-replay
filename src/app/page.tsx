@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { supabase } from "../../lib/supabase";
+import { supabase } from "././lib/supabase";
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
 const HLS_BASE = "https://live.gymcam.stream";
@@ -1110,7 +1110,7 @@ export default function Home() {
                             </div>
 
                             <p className="mt-2 text-[11px] leading-5 text-zinc-600">
-                              Vertical keeps the camera recording landscape and crops the export for Reels, TikTok, and Shorts.
+                              Vertical keeps the camera recording landscape and crops the export.
                             </p>
 
                             {exportFormat === "vertical" && (
