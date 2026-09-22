@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { supabase } from "././lib/supabase";
+import { supabase } from "./lib/supabase";
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
 const HLS_BASE = "https://live.gymcam.stream";
@@ -303,7 +303,6 @@ export default function Home() {
   const [nativeShareAvailable, setNativeShareAvailable] = useState(false);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("landscape");
   const [cropX, setCropX] = useState(0.5);
-  const [cropY, setCropY] = useState(0.5);
   const [cropZoom, setCropZoom] = useState(1);
 
   const [joinCode, setJoinCode] = useState("");
@@ -555,7 +554,6 @@ export default function Home() {
         const exportUrl = new URL(replayUrl.replace("/latest", "/export"));
         exportUrl.searchParams.set("format", exportFormat);
         exportUrl.searchParams.set("cropX", cropX.toFixed(3));
-        exportUrl.searchParams.set("cropY", cropY.toFixed(3));
         exportUrl.searchParams.set("zoom", cropZoom.toFixed(2));
 
         const response = await fetch(exportUrl.toString());
@@ -604,7 +602,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [replayUrl, selectedCamera?.name, exportFormat, cropX, cropY, cropZoom]);
+  }, [replayUrl, selectedCamera?.name, exportFormat, cropX, cropZoom]);
 
   async function loadReplay() {
     if (!selectedCamera) return;
@@ -935,23 +933,53 @@ export default function Home() {
                     {mode === "replay" && (
                       <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
                         {replayUrl ? (
-                          <video
-                            key={replayUrl}
-                            src={replayUrl}
-                            controls
-                            autoPlay
-                            playsInline
-                            preload="metadata"
-                            onLoadedData={() => setReplayLoading(false)}
-                            onCanPlay={() => setReplayLoading(false)}
-                            onError={() => {
-                              setReplayLoading(false);
-                              setReplayMessage(
-                                "Replay could not be loaded. Try a shorter clip or try again in a few seconds."
-                              );
-                            }}
-                            className="aspect-video w-full bg-black object-contain"
-                          />
+                          exportFormat === "vertical" ? (
+                            <div className="flex justify-center bg-black p-3 sm:p-5">
+                              <div className="relative aspect-[9/16] max-h-[72vh] w-auto overflow-hidden rounded-xl bg-black ring-1 ring-white/10">
+                                <video
+                                  key={`${replayUrl}-vertical-preview`}
+                                  src={replayUrl}
+                                  controls
+                                  autoPlay
+                                  playsInline
+                                  preload="metadata"
+                                  onLoadedData={() => setReplayLoading(false)}
+                                  onCanPlay={() => setReplayLoading(false)}
+                                  onError={() => {
+                                    setReplayLoading(false);
+                                    setReplayMessage(
+                                      "Replay could not be loaded. Try a shorter clip or try again in a few seconds."
+                                    );
+                                  }}
+                                  className="h-full w-full bg-black object-cover transition-transform duration-75"
+                                  style={{
+                                    objectPosition: `${cropX * 100}% 50%`,
+                                    transform: `scale(${cropZoom})`,
+                                    transformOrigin: `${cropX * 100}% 50%`,
+                                  }}
+                                />
+                                <div className="pointer-events-none absolute inset-0 ring-1 ring-inset ring-white/15" />
+                              </div>
+                            </div>
+                          ) : (
+                            <video
+                              key={replayUrl}
+                              src={replayUrl}
+                              controls
+                              autoPlay
+                              playsInline
+                              preload="metadata"
+                              onLoadedData={() => setReplayLoading(false)}
+                              onCanPlay={() => setReplayLoading(false)}
+                              onError={() => {
+                                setReplayLoading(false);
+                                setReplayMessage(
+                                  "Replay could not be loaded. Try a shorter clip or try again in a few seconds."
+                                );
+                              }}
+                              className="aspect-video w-full bg-black object-contain"
+                            />
+                          )
                         ) : (
                           <div className="flex aspect-video items-center justify-center px-6 text-center">
                             <div>
@@ -1119,14 +1147,13 @@ export default function Home() {
                                   <div>
                                     <p className="text-xs font-semibold text-zinc-300">Crop position</p>
                                     <p className="mt-1 text-[11px] leading-5 text-zinc-600">
-                                      Move the 9:16 crop and zoom until the gymnast is framed correctly.
+                                      Move the crop left or right and zoom. The replay preview updates instantly.
                                     </p>
                                   </div>
                                   <button
                                     type="button"
                                     onClick={() => {
                                       setCropX(0.5);
-                                      setCropY(0.5);
                                       setCropZoom(1);
                                     }}
                                     className="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 transition hover:bg-white/[0.08] hover:text-white"
@@ -1147,22 +1174,6 @@ export default function Home() {
                                     step="1"
                                     value={Math.round(cropX * 100)}
                                     onChange={(event) => setCropX(Number(event.target.value) / 100)}
-                                    className="w-full accent-blue-500"
-                                  />
-                                </label>
-
-                                <label className="mt-4 block">
-                                  <div className="mb-2 flex items-center justify-between text-[11px]">
-                                    <span className="text-zinc-500">Up ↕ Down</span>
-                                    <span className="font-semibold text-zinc-300">{Math.round(cropY * 100)}%</span>
-                                  </div>
-                                  <input
-                                    type="range"
-                                    min="0"
-                                    max="100"
-                                    step="1"
-                                    value={Math.round(cropY * 100)}
-                                    onChange={(event) => setCropY(Number(event.target.value) / 100)}
                                     className="w-full accent-blue-500"
                                   />
                                 </label>
