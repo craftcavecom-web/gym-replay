@@ -78,11 +78,20 @@ function StatusDot({ status }: { status: string }) {
 }
 
 function LivePlayer({ camera }: { camera: string }) {
+  const [playerLoaded, setPlayerLoaded] = useState(false);
+
   return (
-    <div className="overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
+    <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
+      {!playerLoaded && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/80 text-sm font-medium text-zinc-400">
+          Opening live player…
+        </div>
+      )}
       <iframe
         key={camera}
         src={`${WEBRTC_BASE}/${camera}`}
+        title={`Live feed for ${camera}`}
+        onLoad={() => setPlayerLoaded(true)}
         className="aspect-video w-full border-0 bg-black"
         allow="autoplay; fullscreen; picture-in-picture"
         allowFullScreen
@@ -101,6 +110,7 @@ function DelayedPlayer({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const delayRef = useRef(delaySeconds);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [availableDelay, setAvailableDelay] = useState(0);
 
   function seekToDelay(seconds: number) {
@@ -127,6 +137,7 @@ function DelayedPlayer({
     if (!videoEl) return;
 
     setLoading(true);
+    setError("");
     const src = `${HLS_BASE}/${camera}/index.m3u8`;
     let hls: Hls | null = null;
 
@@ -162,6 +173,8 @@ function DelayedPlayer({
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
           console.warn("Fatal delayed HLS error:", data.type, data.details);
+          setLoading(false);
+          setError("The delayed stream could not be loaded. Check the camera connection and try again.");
         }
       });
     } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
@@ -207,10 +220,16 @@ function DelayedPlayer({
           muted
           playsInline
           onPlaying={() => setLoading(false)}
+          onError={() => {
+            setLoading(false);
+            setError("The delayed stream could not be loaded. Try again in a few seconds.");
+          }}
           onWaiting={() => setLoading(true)}
           className="aspect-video w-full bg-black object-contain"
         />
       </div>
+
+      {error && <p className="mt-3 text-sm text-amber-300">{error}</p>}
 
       <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
         <span>Available history</span>
@@ -243,6 +262,7 @@ function TimeControls({
               key={seconds}
               type="button"
               disabled={disabled}
+              aria-pressed={selected}
               onClick={() => onChange(seconds)}
               className={`rounded-xl border px-2 py-2.5 text-xs font-semibold transition sm:text-sm ${
                 selected
@@ -327,13 +347,26 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setNativeShareAvailable(isMobileShareDevice() && typeof navigator.share === "function");
+    const timer = window.setTimeout(() => {
+      setNativeShareAvailable(
+        isMobileShareDevice() && typeof navigator.share === "function",
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
     if (userId) loadGyms(userId);
     else setGyms([]);
   }, [userId]);
+
+  useEffect(() => {
+    if (!selectedGym || !selectedCamera) return;
+    window.sessionStorage.setItem(
+      "gymcam:view",
+      JSON.stringify({ gymId: selectedGym.id, cameraId: selectedCamera.id, mode }),
+    );
+  }, [selectedGym, selectedCamera, mode]);
 
   async function checkUser() {
     const {
@@ -392,6 +425,16 @@ export default function Home() {
     }));
 
     setGyms(finalGyms);
+    const savedView = window.sessionStorage.getItem("gymcam:view");
+    if (savedView && !selectedGym) {
+      try {
+        const saved = JSON.parse(savedView) as { gymId?: string };
+        const gym = finalGyms.find((item) => item.id === saved.gymId);
+        if (gym) void openGym(gym);
+      } catch {
+        window.sessionStorage.removeItem("gymcam:view");
+      }
+    }
     setGymsLoading(false);
   }
 
@@ -454,7 +497,20 @@ export default function Home() {
     const cameraRows = (data ?? []) as Camera[];
     setCameras(cameraRows);
 
-    if (cameraRows.length > 0) setSelectedCamera(cameraRows[0]);
+    const savedView = window.sessionStorage.getItem("gymcam:view");
+    let savedCameraId: string | undefined;
+    let savedMode: VideoMode | undefined;
+    try {
+      const saved = savedView ? JSON.parse(savedView) : null;
+      savedCameraId = saved?.cameraId;
+      savedMode = ["live", "delay", "replay"].includes(saved?.mode)
+        ? saved.mode
+        : undefined;
+    } catch {}
+    if (cameraRows.length > 0) {
+      setSelectedCamera(cameraRows.find((camera) => camera.id === savedCameraId) ?? cameraRows[0]);
+      if (savedMode) setMode(savedMode);
+    }
     setCamerasLoading(false);
   }
 
@@ -535,6 +591,7 @@ export default function Home() {
     setReplayUrl("");
     setJoinCode("");
     setJoinMessage("");
+    window.sessionStorage.removeItem("gymcam:view");
   }
   async function requestSignedMediaUrl(
     endpoint: "latest" | "export",
@@ -787,7 +844,7 @@ export default function Home() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, gymId: selectedGym?.id }),
       });
 
       const data = await response.json();
@@ -876,7 +933,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-2 sm:flex">
                   <button
                     type="button"
-                    disabled={cameraControlBusy || cameraControlStatus === "active"}
+                    disabled={cameraControlBusy || cameraControlStatus !== "inactive"}
                     onClick={() => controlCameras("start")}
                     className="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -884,7 +941,7 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    disabled={cameraControlBusy || cameraControlStatus === "inactive"}
+                    disabled={cameraControlBusy || cameraControlStatus !== "active"}
                     onClick={() => controlCameras("stop")}
                     className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -981,7 +1038,7 @@ export default function Home() {
                       </span>
                     </div>
 
-                    {mode === "live" && <LivePlayer camera={selectedCamera.stream_path} />}
+                    {mode === "live" && <LivePlayer key={selectedCamera.id} camera={selectedCamera.stream_path} />}
 
                     {mode === "delay" && (
                       <DelayedPlayer
@@ -1098,6 +1155,7 @@ export default function Home() {
                                 ? "bg-white text-black"
                                 : "text-zinc-400 hover:bg-white/[0.06] hover:text-white"
                             }`}
+                            aria-pressed={mode === value}
                           >
                             {label}
                           </button>
@@ -1175,6 +1233,7 @@ export default function Home() {
                               <button
                                 type="button"
                                 onClick={() => setExportFormat("landscape")}
+                                aria-pressed={exportFormat === "landscape"}
                                 className={`rounded-lg px-3 py-2.5 text-xs font-semibold transition ${
                                   exportFormat === "landscape"
                                     ? "bg-white text-black"
@@ -1187,6 +1246,7 @@ export default function Home() {
                               <button
                                 type="button"
                                 onClick={() => setExportFormat("vertical")}
+                                aria-pressed={exportFormat === "vertical"}
                                 className={`rounded-lg px-3 py-2.5 text-xs font-semibold transition ${
                                   exportFormat === "vertical"
                                     ? "bg-white text-black"
@@ -1216,7 +1276,7 @@ export default function Home() {
                                       setCropX(0.5);
                                       setCropZoom(1);
                                     }}
-                                    className="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 transition hover:bg-white/[0.08] hover:text-white"
+                                  className="min-h-10 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-400 transition hover:bg-white/[0.08] hover:text-white"
                                   >
                                     Reset
                                   </button>
@@ -1466,8 +1526,10 @@ export default function Home() {
 
             <div className="mt-7 space-y-3">
               <div>
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Email</label>
+                <label htmlFor="email" className="mb-2 block text-xs font-semibold uppercase tracking-wider text-zinc-500">Email</label>
                 <input
+                  id="email"
+                  name="email"
                   type="email"
                   autoComplete="email"
                   placeholder="you@example.com"
@@ -1479,17 +1541,19 @@ export default function Home() {
 
               <div>
                 <div className="mb-2 flex items-center justify-between">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Password</label>
+                  <label htmlFor="password" className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Password</label>
                   <button
                     type="button"
                     onClick={forgotPassword}
-                    className="text-xs font-medium text-zinc-500 transition hover:text-white"
+                    className="min-h-10 px-2 text-xs font-medium text-zinc-500 transition hover:text-white"
                   >
                     Forgot password?
                   </button>
                 </div>
 
                 <input
+                  id="password"
+                  name="password"
                   type="password"
                   autoComplete="current-password"
                   placeholder="Password"

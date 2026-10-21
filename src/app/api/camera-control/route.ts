@@ -51,28 +51,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: access, error: accessError } =
-      await supabase
-        .from("user_gym_access")
-        .select("role")
-        .eq("user_id", user.id)
-        .eq("role", "admin")
-        .limit(1);
-
-    if (
-      accessError ||
-      !access ||
-      access.length === 0
-    ) {
-      return NextResponse.json(
-        { error: "Admin access required" },
-        { status: 403 }
-      );
-    }
-
     const body = await request.json();
-
     const action = body.action;
+    const gymId = typeof body.gymId === "string" ? body.gymId : "";
 
     if (
       action !== "start" &&
@@ -82,6 +63,33 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Invalid action" },
         { status: 400 }
+      );
+    }
+
+    if (!gymId) {
+      return NextResponse.json(
+        { error: "Gym is required" },
+        { status: 400 }
+      );
+    }
+
+    // An administrator for one gym must never be able to control another gym.
+    const { data: access, error: accessError } =
+      await supabase
+        .from("user_gym_access")
+        .select("role")
+        .eq("user_id", user.id)
+        .eq("gym_id", gymId)
+        .eq("role", "admin")
+        .maybeSingle();
+
+    if (
+      accessError ||
+      !access
+    ) {
+      return NextResponse.json(
+        { error: "Admin access required" },
+        { status: 403 }
       );
     }
 
