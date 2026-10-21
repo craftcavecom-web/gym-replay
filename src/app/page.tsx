@@ -6,7 +6,6 @@ import { supabase } from "./lib/supabase";
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
 const HLS_BASE = "https://live.gymcam.stream";
-const MOBILE_REPLAY_BASE = "https://mobile-replay.gymcam.stream";
 
 type VideoMode = "live" | "delay" | "replay";
 type ExportFormat = "landscape" | "vertical";
@@ -537,8 +536,53 @@ export default function Home() {
     setJoinCode("");
     setJoinMessage("");
   }
+  async function requestSignedMediaUrl(
+    endpoint: "latest" | "export",
+  ) {
+    if (!selectedGym || !selectedCamera) {
+      throw new Error("Select a gym and camera first.");
+    }
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session) {
+      throw new Error("Not signed in.");
+    }
+
+    const response = await fetch("/api/replay-url", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        gymId: selectedGym.id,
+        cameraId: selectedCamera.id,
+        endpoint,
+        duration: replaySeconds,
+        ...(endpoint === "export"
+          ? {
+              format: exportFormat,
+              cropX,
+              zoom: cropZoom,
+            }
+          : {}),
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.url) {
+      throw new Error(data.error ?? "Could not authorize replay request.");
+    }
+
+    return data.url as string;
+  }
+
   useEffect(() => {
-    if (!replayUrl) {
+    if (!replayUrl || !selectedGym || !selectedCamera) {
       setShareFile(null);
       setSharePreparing(false);
       return;
@@ -546,81 +590,97 @@ export default function Home() {
 
     let cancelled = false;
 
-    async function prepareShareFile() {
-      try {
-        setSharePreparing(true);
-        setShareFile(null);
-
-        const exportUrl = new URL(replayUrl.replace("/latest", "/export"));
-        exportUrl.searchParams.set("format", exportFormat);
-        exportUrl.searchParams.set("cropX", cropX.toFixed(3));
-        exportUrl.searchParams.set("zoom", cropZoom.toFixed(2));
-
-        const response = await fetch(exportUrl.toString());
-
-        if (!response.ok) {
-          throw new Error(`Replay fetch failed with ${response.status}`);
-        }
-
-        const blob = await response.blob();
-
-        if (!blob.size) {
-          throw new Error("Replay file was empty.");
-        }
-
-        const safeCameraName = (selectedCamera?.name ?? "clip")
-          .replace(/[^a-z0-9-_]+/gi, "-")
-          .replace(/^-+|-+$/g, "") || "clip";
-
-        const formatSuffix = exportFormat === "vertical" ? "-vertical" : "";
-
-        const file = new File(
-          [blob],
-          `gymcam-${safeCameraName}${formatSuffix}.mp4`,
-          { type: "video/mp4" },
-        );
-
-        if (!cancelled) {
-          setShareFile(file);
-        }
-      } catch (error) {
-        console.error("Share preparation error:", error);
-
-        if (!cancelled) {
+    // Do not start a costly Pi export while the user is still moving a crop slider.
+    const timer = window.setTimeout(() => {
+      async function prepareShareFile() {
+        try {
+          setSharePreparing(true);
           setShareFile(null);
-          setReplayMessage("Replay works, but the clip could not be prepared for sharing yet.");
-        }
-      } finally {
-        if (!cancelled) {
-          setSharePreparing(false);
+
+          const exportUrl = await requestSignedMediaUrl("export");
+
+          if (cancelled) return;
+
+          const response = await fetch(exportUrl);
+
+          if (!response.ok) {
+            throw new Error(`Replay fetch failed with ${response.status}`);
+          }
+
+          const blob = await response.blob();
+
+          if (!blob.size) {
+            throw new Error("Replay file was empty.");
+          }
+
+          const safeCameraName = (selectedCamera?.name ?? "clip")
+            .replace(/[^a-z0-9-_]+/gi, "-")
+            .replace(/^-+|-+$/g, "") || "clip";
+
+          const formatSuffix = exportFormat === "vertical" ? "-vertical" : "";
+
+          const file = new File(
+            [blob],
+            `gymcam-${safeCameraName}${formatSuffix}.mp4`,
+            { type: "video/mp4" },
+          );
+
+          if (!cancelled) {
+            setShareFile(file);
+          }
+        } catch (error) {
+          console.error("Share preparation error:", error);
+
+          if (!cancelled) {
+            setShareFile(null);
+            setReplayMessage(
+              "Replay works, but the clip could not be prepared for sharing yet.",
+            );
+          }
+        } finally {
+          if (!cancelled) {
+            setSharePreparing(false);
+          }
         }
       }
-    }
 
-    void prepareShareFile();
+      void prepareShareFile();
+    }, 800);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [replayUrl, selectedCamera?.name, exportFormat, cropX, cropZoom]);
+  }, [
+    replayUrl,
+    selectedGym?.id,
+    selectedCamera?.id,
+    selectedCamera?.name,
+    exportFormat,
+    cropX,
+    cropZoom,
+    replaySeconds,
+  ]);
 
   async function loadReplay() {
-    if (!selectedCamera) return;
+    if (!selectedGym || !selectedCamera) return;
 
     setReplayMessage("");
     setReplayLoading(true);
     setShareFile(null);
 
-    const path = selectedCamera.stream_path;
-
-    const url =
-      `${MOBILE_REPLAY_BASE}/latest` +
-      `?path=${encodeURIComponent(path)}` +
-      `&duration=${replaySeconds}` +
-      `&t=${Date.now()}`;
-
-    setReplayUrl(url);
-    setMode("replay");
+    try {
+      const url = await requestSignedMediaUrl("latest");
+      setReplayUrl(url);
+      setMode("replay");
+    } catch (error) {
+      console.error("Replay authorization error:", error);
+      setReplayLoading(false);
+      setReplayUrl("");
+      setReplayMessage(
+        error instanceof Error ? error.message : "Could not authorize replay.",
+      );
+    }
   }
 
   function downloadClip(file: File) {
@@ -1138,7 +1198,7 @@ export default function Home() {
                             </div>
 
                             <p className="mt-2 text-[11px] leading-5 text-zinc-600">
-                              Vertical keeps the camera recording landscape and crops the export.
+                              Vertical keeps the camera recording landscape and crops the export for Reels, TikTok, and Shorts.
                             </p>
 
                             {exportFormat === "vertical" && (
