@@ -1,0 +1,22 @@
+[Unit]
+Description=GymCam narrow camera control API
+After=network-online.target mediamtx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/gymcam-control.env
+WorkingDirectory=/opt/gymcam-control
+ExecStart=/opt/gymcam-control/venv/bin/python /opt/gymcam-control/gymcam_control.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/mediamtx.yml /var/lib/gymcam-control
+
+[Install]
+WantedBy=multi-user.target

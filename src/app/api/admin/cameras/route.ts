@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
   const result = await adminForGym(request, gymId);
   if ("response" in result) return result.response;
   const { data, error } = await result.db.from("cameras")
-    .select("id, gym_id, name, stream_path, sort_order, created_at")
+    .select("id, gym_id, name, stream_path, sort_order, created_at, device_id, device_path")
     .eq("gym_id", gymId).order("sort_order", { ascending: true }).order("created_at", { ascending: true });
   if (error) return reply("Could not load cameras.", 500);
   return NextResponse.json({ cameras: data ?? [] }, { headers: { "Cache-Control": "no-store" } });
@@ -62,10 +62,13 @@ export async function POST(request: NextRequest) {
   if (!gymId || "error" in input) return reply(input.error ?? "Invalid camera request.", 400);
   const result = await adminForGym(request, gymId);
   if ("response" in result) return result.response;
+  const { data: collision, error: collisionError } = await result.db.from("cameras").select("id").eq("stream_path", input.streamPath).limit(1);
+  if (collisionError) return reply("Could not validate stream path.", 500);
+  if (collision?.length) return reply("That stream path is already in use.", 409);
   const { data: existing, error: countError } = await result.db.from("cameras").select("sort_order").eq("gym_id", gymId).order("sort_order", { ascending: false }).limit(1);
   if (countError) return reply("Could not prepare camera.", 500);
   const sortOrder = (existing?.[0]?.sort_order ?? -1) + 1;
-  const { data, error } = await result.db.from("cameras").insert({ gym_id: gymId, name: input.name, stream_path: input.streamPath, sort_order: sortOrder }).select("id, gym_id, name, stream_path, sort_order, created_at").single();
+  const { data, error } = await result.db.from("cameras").insert({ gym_id: gymId, name: input.name, stream_path: input.streamPath, sort_order: sortOrder }).select("id, gym_id, name, stream_path, sort_order, created_at, device_id, device_path").single();
   if (error) return reply("Could not add camera.", 500);
   return NextResponse.json({ camera: data }, { status: 201, headers: { "Cache-Control": "no-store" } });
 }
@@ -91,7 +94,14 @@ export async function PATCH(request: NextRequest) {
   const cameraId = typeof body.cameraId === "string" ? body.cameraId : "";
   const input = cameraInput(body);
   if (!cameraId || "error" in input) return reply(input.error ?? "Invalid camera request.", 400);
-  const { data, error } = await result.db.from("cameras").update({ name: input.name, stream_path: input.streamPath }).eq("id", cameraId).eq("gym_id", gymId).select("id, gym_id, name, stream_path, sort_order, created_at").maybeSingle();
+  const { data: current, error: currentError } = await result.db.from("cameras").select("device_id, stream_path").eq("id", cameraId).eq("gym_id", gymId).maybeSingle();
+  if (currentError) return reply("Could not load camera.", 500);
+  if (!current) return reply("Camera not found in this gym.", 404);
+  if (current.device_id && current.stream_path !== input.streamPath) return reply("Reconfigure the linked physical camera to change its stream path.", 409);
+  const { data: collisions, error: collisionError } = await result.db.from("cameras").select("id").eq("stream_path", input.streamPath).neq("id", cameraId).limit(1);
+  if (collisionError) return reply("Could not validate stream path.", 500);
+  if (collisions?.length) return reply("That stream path is already in use.", 409);
+  const { data, error } = await result.db.from("cameras").update({ name: input.name, stream_path: input.streamPath }).eq("id", cameraId).eq("gym_id", gymId).select("id, gym_id, name, stream_path, sort_order, created_at, device_id, device_path").maybeSingle();
   if (error) return reply("Could not update camera.", 500);
   if (!data) return reply("Camera not found in this gym.", 404);
   return NextResponse.json({ camera: data }, { headers: { "Cache-Control": "no-store" } });
@@ -103,6 +113,10 @@ export async function DELETE(request: NextRequest) {
   if (!gymId || !cameraId) return reply("Missing camera request fields.", 400);
   const result = await adminForGym(request, gymId);
   if ("response" in result) return result.response;
+  const { data: current, error: readError } = await result.db.from("cameras").select("device_id").eq("id", cameraId).eq("gym_id", gymId).maybeSingle();
+  if (readError) return reply("Could not load camera.", 500);
+  if (!current) return reply("Camera not found in this gym.", 404);
+  if (current.device_id) return reply("Remove linked physical cameras through the camera setup workflow.", 409);
   const { data, error } = await result.db.from("cameras").delete().eq("id", cameraId).eq("gym_id", gymId).select("id").maybeSingle();
   if (error) return reply("Could not remove camera.", 500);
   if (!data) return reply("Camera not found in this gym.", 404);

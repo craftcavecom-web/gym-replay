@@ -117,17 +117,20 @@ export default function ClipHistoryPage() {
   const [userLookupWarning, setUserLookupWarning] = useState("");
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const requestedGymId = params.get("gym") ?? "";
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      const requestedGymId = params.get("gym") ?? "";
 
-    if (!requestedGymId) {
-      setError("No gym was selected.");
-      setLoading(false);
-      return;
-    }
+      if (!requestedGymId) {
+        setError("No gym was selected.");
+        setLoading(false);
+        return;
+      }
 
-    setGymId(requestedGymId);
-    void loadHistory(requestedGymId, false);
+      setGymId(requestedGymId);
+      void loadHistory(requestedGymId, false);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   async function loadExportUsers(currentGymId: string) {

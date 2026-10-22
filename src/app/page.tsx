@@ -124,13 +124,17 @@ function DelayedPlayer({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const delayRef = useRef(delaySeconds);
-  const [loading, setLoading] = useState(true);
+  const initialSeekDoneRef = useRef(false);
+  const lastCorrectionRef = useRef(0);
+  const [status, setStatus] = useState<"preparing" | "connecting" | "playing" | "reconnecting" | "error">("preparing");
   const [error, setError] = useState("");
   const [availableDelay, setAvailableDelay] = useState(0);
+  const [actualDelay, setActualDelay] = useState<number | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
-  function seekToDelay(seconds: number) {
+  function seekToDelay(seconds: number, force = false) {
     const video = videoRef.current;
-    if (!video || !video.seekable.length) return;
+    if (!video || !video.seekable.length) return false;
 
     const start = video.seekable.start(0);
     const end = video.seekable.end(video.seekable.length - 1);
@@ -139,24 +143,34 @@ function DelayedPlayer({
     setAvailableDelay(available);
 
     const wantedDelay = Math.min(seconds, available);
-    video.currentTime = end - wantedDelay;
+    const target = Math.max(start, end - wantedDelay);
+    if (force || Math.abs(video.currentTime - target) > 0.5) {
+      video.currentTime = target;
+    }
+    video.playbackRate = 1;
+    setActualDelay(Math.max(0, end - target));
+    return true;
   }
 
   useEffect(() => {
     delayRef.current = delaySeconds;
-    seekToDelay(delaySeconds);
+    // A user-selected delay change is an intentional, one-time reposition.
+    seekToDelay(delaySeconds, true);
   }, [delaySeconds]);
 
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
-    setLoading(true);
+    setStatus("preparing");
     setError("");
+    setActualDelay(null);
+    initialSeekDoneRef.current = false;
+    lastCorrectionRef.current = 0;
     const src = `${HLS_BASE}/${camera}/index.m3u8`;
     let hls: Hls | null = null;
 
-    const keepDelay = () => {
+    const updateDelayStatus = () => {
       const video = videoRef.current;
       if (!video || !video.seekable.length) return;
 
@@ -165,66 +179,100 @@ function DelayedPlayer({
       const available = Math.max(0, end - start);
 
       setAvailableDelay(available);
+      setActualDelay(Math.max(0, end - video.currentTime));
+    };
 
+    const seekInitially = () => {
+      if (initialSeekDoneRef.current) return;
+      if (!seekToDelay(delayRef.current, true)) return;
+      initialSeekDoneRef.current = true;
+      videoRef.current?.play().catch(() => {});
+    };
+
+    const correctMeaningfulDrift = () => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.seeking || !video.seekable.length) return;
+
+      const end = video.seekable.end(video.seekable.length - 1);
+      const available = Math.max(0, end - video.seekable.start(0));
       const wantedDelay = Math.min(delayRef.current, available);
-      const target = end - wantedDelay;
-      const difference = Math.abs(video.currentTime - target);
+      const drift = Math.abs((end - video.currentTime) - wantedDelay);
+      const now = Date.now();
 
-      if (difference > 2) video.currentTime = target;
+      // HLS playlist windows move in chunks. Ignore ordinary 1-2 second movement and
+      // only make a single correction when the offset is plainly wrong.
+      if (drift >= 8 && now - lastCorrectionRef.current >= 30_000) {
+        if (seekToDelay(delayRef.current, true)) lastCorrectionRef.current = now;
+      }
     };
 
     if (Hls.isSupported()) {
-      hls = new Hls({ lowLatencyMode: false });
+      hls = new Hls({
+        lowLatencyMode: false,
+        liveSyncDuration: delayRef.current,
+        liveMaxLatencyDuration: delayRef.current + 30,
+        maxLiveSyncPlaybackRate: 1,
+        backBufferLength: Math.max(600, delayRef.current + 60),
+      });
       hls.loadSource(src);
       hls.attachMedia(videoEl);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => setStatus("connecting"));
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        window.setTimeout(() => {
-          seekToDelay(delayRef.current);
-          videoRef.current?.play().catch(() => {});
-        }, 500);
+        window.setTimeout(seekInitially, 250);
       });
+      hls.on(Hls.Events.LEVEL_UPDATED, seekInitially);
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
           console.warn("Fatal delayed HLS error:", data.type, data.details);
-          setLoading(false);
+          setStatus("error");
           setError("The delayed stream could not be loaded. Check the camera connection and try again.");
         }
       });
     } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
       videoEl.src = src;
+      setStatus("connecting");
       videoEl.addEventListener(
         "loadedmetadata",
-        () => {
-          seekToDelay(delayRef.current);
-          videoRef.current?.play().catch(() => {});
-        },
+        seekInitially,
         { once: true },
       );
+    } else {
+      setStatus("error");
+      setError("This browser cannot play the delayed stream.");
     }
 
-    const timer = window.setInterval(keepDelay, 1000);
+    const statusTimer = window.setInterval(updateDelayStatus, 5_000);
+    const driftTimer = window.setInterval(correctMeaningfulDrift, 15_000);
 
     return () => {
-      window.clearInterval(timer);
+      window.clearInterval(statusTimer);
+      window.clearInterval(driftTimer);
       hls?.destroy();
 
-      const video = videoRef.current;
-      if (video) {
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
-      }
+      videoEl.pause();
+      videoEl.removeAttribute("src");
+      videoEl.load();
     };
-  }, [camera]);
+  }, [camera, delaySeconds, retryKey]);
+
+  const statusText = status === "preparing"
+    ? "Preparing delayed stream…"
+    : status === "connecting"
+      ? "Connecting…"
+      : status === "reconnecting"
+        ? "Reconnecting…"
+        : status === "playing"
+          ? `Playing ${formatTime(Math.round(actualDelay ?? delaySeconds))} behind live`
+          : "Unable to load delayed stream";
 
   return (
     <div>
       <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
-        {loading && (
+        {status !== "playing" && status !== "error" && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/80 text-sm font-medium text-zinc-400 backdrop-blur-sm">
-            Connecting to delayed stream…
+            {statusText}
           </div>
         )}
 
@@ -234,17 +282,41 @@ function DelayedPlayer({
           autoPlay
           muted
           playsInline
-          onPlaying={() => setLoading(false)}
+          onLoadedMetadata={() => {
+            if (!initialSeekDoneRef.current && seekToDelay(delayRef.current, true)) {
+              initialSeekDoneRef.current = true;
+            }
+          }}
+          onPlaying={() => {
+            if (videoRef.current) videoRef.current.playbackRate = 1;
+            setStatus("playing");
+          }}
+          onRateChange={() => {
+            if (videoRef.current && videoRef.current.playbackRate !== 1) {
+              videoRef.current.playbackRate = 1;
+            }
+          }}
           onError={() => {
-            setLoading(false);
+            setStatus("error");
             setError("The delayed stream could not be loaded. Try again in a few seconds.");
           }}
-          onWaiting={() => setLoading(true)}
+          onWaiting={() => setStatus((current) => current === "error" ? current : "reconnecting")}
           className="aspect-video w-full bg-black object-contain"
         />
       </div>
 
-      {error && <p className="mt-3 text-sm text-amber-300">{error}</p>}
+      <div className="mt-3 flex items-center justify-between gap-3 text-sm">
+        <p className={error ? "text-amber-300" : "text-zinc-400"}>{error || statusText}</p>
+        {status === "error" && (
+          <button
+            type="button"
+            onClick={() => setRetryKey((value) => value + 1)}
+            className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 font-semibold text-zinc-200"
+          >
+            Retry
+          </button>
+        )}
+      </div>
 
       <div className="mt-3 flex items-center justify-between text-xs text-zinc-500">
         <span>Available history</span>
@@ -346,42 +418,6 @@ export default function Home() {
   const [cameraControlStatus, setCameraControlStatus] = useState<CameraSystemStatus>("unknown");
   const [cameraControlMessage, setCameraControlMessage] = useState("");
   const [cameraControlBusy, setCameraControlBusy] = useState(false);
-
-  useEffect(() => {
-    checkUser();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const user = session?.user;
-      setUserEmail(user?.email ?? null);
-      setUserId(user?.id ?? null);
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setNativeShareAvailable(
-        isMobileShareDevice() && typeof navigator.share === "function",
-      );
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-
-  useEffect(() => {
-    if (userId) loadGyms(userId);
-    else setGyms([]);
-  }, [userId]);
-
-  useEffect(() => {
-    if (!selectedGym || !selectedCamera) return;
-    window.sessionStorage.setItem(
-      "gymcam:view",
-      JSON.stringify({ gymId: selectedGym.id, cameraId: selectedCamera.id, mode }),
-    );
-  }, [selectedGym, selectedCamera, mode]);
 
   async function checkUser() {
     const {
@@ -494,7 +530,7 @@ export default function Home() {
     setCamerasLoading(true);
 
     if (gym.role === "admin") {
-      void controlCameras("status", true);
+      void controlCameras("status", true, gym.id);
     }
 
     const { data, error } = await supabase
@@ -656,9 +692,11 @@ export default function Home() {
 
   useEffect(() => {
     if (!replayUrl || !selectedGym || !selectedCamera) {
-      setShareFile(null);
-      setSharePreparing(false);
-      return;
+      const resetTimer = window.setTimeout(() => {
+        setShareFile(null);
+        setSharePreparing(false);
+      }, 0);
+      return () => window.clearTimeout(resetTimer);
     }
 
     let cancelled = false;
@@ -831,6 +869,7 @@ export default function Home() {
   async function controlCameras(
     action: "start" | "stop" | "status",
     quiet = false,
+    gymId = selectedGym?.id,
   ) {
     try {
       setCameraControlBusy(true);
@@ -863,7 +902,7 @@ export default function Home() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${session.access_token}`,
         },
-        body: JSON.stringify({ action, gymId: selectedGym?.id }),
+        body: JSON.stringify({ action, gymId }),
       });
 
       const data = await response.json();
@@ -901,6 +940,48 @@ export default function Home() {
     setReplayUrl("");
     setReplayMessage("");
   }
+
+  useEffect(() => {
+    const checkTimer = window.setTimeout(() => void checkUser(), 0);
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user;
+      setUserEmail(user?.email ?? null);
+      setUserId(user?.id ?? null);
+    });
+
+    return () => {
+      window.clearTimeout(checkTimer);
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setNativeShareAvailable(
+        isMobileShareDevice() && typeof navigator.share === "function",
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (userId) void loadGyms(userId);
+      else setGyms([]);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [userId]);
+
+  useEffect(() => {
+    if (!selectedGym || !selectedCamera) return;
+    window.sessionStorage.setItem(
+      "gymcam:view",
+      JSON.stringify({ gymId: selectedGym.id, cameraId: selectedCamera.id, mode }),
+    );
+  }, [selectedGym, selectedCamera, mode]);
 
   if (userEmail && selectedGym) {
     const isAdmin = selectedGym.role === "admin";
