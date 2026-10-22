@@ -157,6 +157,15 @@ function DelayedPlayer({
     return true;
   }
 
+  function hasEnoughHistory(video: HTMLVideoElement, seconds: number) {
+    if (!video.seekable.length) return false;
+    const start = video.seekable.start(0);
+    const end = video.seekable.end(video.seekable.length - 1);
+    const available = Math.max(0, end - start);
+    const safetyMargin = Math.min(2, available / 4);
+    return available - safetyMargin >= seconds - 1;
+  }
+
   useEffect(() => {
     delayRef.current = delaySeconds;
     const hls = hlsRef.current;
@@ -218,9 +227,23 @@ function DelayedPlayer({
       setAvailableDelay(available);
       setActualDelay(measuredDelay);
 
+      // A fresh on-demand HLS session may initially expose only a few seconds
+      // of history. Keep playing it silently behind the preparation overlay so
+      // the window can grow, but do not claim the requested delay is active
+      // until that offset is actually available.
+      if (!hasEnoughHistory(video, delayRef.current)) {
+        video.playbackRate = 1;
+        setStatus("preparing");
+        return;
+      }
+
       if (video.paused || video.seeking || !initialSeekDoneRef.current) {
         video.playbackRate = 1;
         return;
+      }
+
+      if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+        setStatus((current) => current === "error" || current === "reconnecting" ? current : "playing");
       }
 
       // Playlist edges advance in segment-sized steps, so a small amount of
@@ -343,7 +366,8 @@ function DelayedPlayer({
           onPlaying={() => {
             recoveryAttemptsRef.current = 0;
             setError("");
-            setStatus("playing");
+            const video = videoRef.current;
+            setStatus(video && hasEnoughHistory(video, delayRef.current) ? "playing" : "preparing");
           }}
           onError={() => {
             setStatus("error");
