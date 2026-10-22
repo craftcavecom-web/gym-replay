@@ -10,6 +10,11 @@ const controlUrl =
 const controlSecret =
   process.env.GYMCAM_CONTROL_SECRET!;
 
+const statusAliases: Record<string, "running" | "stopped" | "starting" | "stopping" | "unknown" | "error"> = {
+  active: "running", inactive: "stopped", online: "running", offline: "stopped",
+  running: "running", stopped: "stopped", starting: "starting", stopping: "stopping", error: "error",
+};
+
 export async function POST(request: NextRequest) {
   try {
     const authorization =
@@ -110,10 +115,12 @@ export async function POST(request: NextRequest) {
       }
     );
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
+    const receivedStatus = typeof data.status === "string" ? data.status.toLowerCase() : typeof data.state === "string" ? data.state.toLowerCase() : "";
+    const status = statusAliases[receivedStatus] ?? (response.ok ? "unknown" : "error");
 
     return NextResponse.json(
-      data,
+      { ...data, status },
       {
         status: response.status,
       }

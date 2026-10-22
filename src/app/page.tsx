@@ -24,6 +24,8 @@ type Camera = {
   stream_path: string;
 };
 
+type CameraSystemStatus = "running" | "stopped" | "starting" | "stopping" | "unknown" | "error";
+
 type AccessRow = {
   gym_id: string;
   role: string;
@@ -58,8 +60,13 @@ function BrandMark() {
 }
 
 function StatusDot({ status }: { status: string }) {
-  const active = status === "active";
-  const inactive = status === "inactive";
+  const labels: Record<CameraSystemStatus, string> = {
+    running: "Running", stopped: "Stopped", starting: "Starting", stopping: "Stopping", unknown: "Unknown", error: "Error",
+  };
+  const normalized = (status in labels ? status : "unknown") as CameraSystemStatus;
+  const active = normalized === "running";
+  const transitional = normalized === "starting" || normalized === "stopping";
+  const failed = normalized === "error";
 
   return (
     <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-zinc-300">
@@ -67,31 +74,39 @@ function StatusDot({ status }: { status: string }) {
         className={`h-2 w-2 rounded-full ${
           active
             ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,.65)]"
-            : inactive
-              ? "bg-zinc-600"
-              : "bg-amber-400"
+            : failed
+              ? "bg-red-400"
+              : transitional
+                ? "animate-pulse bg-blue-400"
+                : normalized === "stopped"
+                  ? "bg-zinc-600"
+                  : "bg-amber-400"
         }`}
       />
-      {active ? "Online" : inactive ? "Offline" : "Unknown"}
+      {labels[normalized]}
     </span>
   );
 }
 
-function LivePlayer({ camera }: { camera: string }) {
-  const [playerLoaded, setPlayerLoaded] = useState(false);
+function LivePlayer({ camera, cameraName }: { camera: string; cameraName: string }) {
+  const [state, setState] = useState<"connecting" | "connected" | "error">("connecting");
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-black shadow-2xl shadow-black/30">
-      {!playerLoaded && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/80 text-sm font-medium text-zinc-400">
-          Opening live player…
+      <div className="pointer-events-none absolute left-3 top-3 z-10 rounded-full border border-white/10 bg-black/70 px-3 py-1.5 text-xs font-semibold text-zinc-200 backdrop-blur">
+        {state === "connected" ? `${cameraName} · Connected` : state === "error" ? `${cameraName} · Unable to connect` : `${cameraName} · Connecting…`}
+      </div>
+      {state !== "connected" && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/80 px-6 text-center text-sm font-medium text-zinc-400">
+          {state === "error" ? "The live player could not connect. Check the camera system and try another view." : "Connecting to live camera…"}
         </div>
       )}
       <iframe
         key={camera}
         src={`${WEBRTC_BASE}/${camera}`}
         title={`Live feed for ${camera}`}
-        onLoad={() => setPlayerLoaded(true)}
+        onLoad={() => setState("connected")}
+        onError={() => setState("error")}
         className="aspect-video w-full border-0 bg-black"
         allow="autoplay; fullscreen; picture-in-picture"
         allowFullScreen
@@ -328,7 +343,7 @@ export default function Home() {
   const [joinMessage, setJoinMessage] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
 
-  const [cameraControlStatus, setCameraControlStatus] = useState("unknown");
+  const [cameraControlStatus, setCameraControlStatus] = useState<CameraSystemStatus>("unknown");
   const [cameraControlMessage, setCameraControlMessage] = useState("");
   const [cameraControlBusy, setCameraControlBusy] = useState(false);
 
@@ -484,8 +499,9 @@ export default function Home() {
 
     const { data, error } = await supabase
       .from("cameras")
-      .select("id, gym_id, name, stream_path")
+      .select("id, gym_id, name, stream_path, sort_order")
       .eq("gym_id", gym.id)
+      .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
     if (error) {
@@ -819,6 +835,9 @@ export default function Home() {
     try {
       setCameraControlBusy(true);
 
+      if (action === "start") setCameraControlStatus("starting");
+      if (action === "stop") setCameraControlStatus("stopping");
+
       if (!quiet) {
         setCameraControlMessage(
           action === "start"
@@ -850,24 +869,27 @@ export default function Home() {
       const data = await response.json();
 
       if (!response.ok) {
+        setCameraControlStatus("error");
         setCameraControlMessage(data.error ?? "Camera control failed.");
         return;
       }
 
-      const status = data.status ?? (action === "start" ? "active" : action === "stop" ? "inactive" : "unknown");
+      const rawStatus = data.status ?? data.state;
+      const aliases: Record<string, CameraSystemStatus> = {
+        active: "running", inactive: "stopped", online: "running", offline: "stopped",
+        running: "running", stopped: "stopped", starting: "starting", stopping: "stopping", error: "error",
+      };
+      const status = typeof rawStatus === "string" ? aliases[rawStatus.toLowerCase()] ?? "unknown" : "unknown";
       setCameraControlStatus(status);
 
       if (!quiet) {
         setCameraControlMessage(
-          action === "start"
-            ? "Camera system is online."
-            : action === "stop"
-              ? "Camera system is offline."
-              : "",
+          data.message ?? (status === "starting" ? "Camera system is starting…" : status === "stopping" ? "Camera system is stopping…" : status === "running" ? "Camera system is running." : status === "stopped" ? "Camera system is stopped." : status === "error" ? "Camera system reported an error." : "Status could not be confirmed."),
         );
       }
     } catch (error) {
       console.error(error);
+      setCameraControlStatus("error");
       setCameraControlMessage("Could not contact the camera system.");
     } finally {
       setCameraControlBusy(false);
@@ -933,7 +955,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-2 sm:flex">
                   <button
                     type="button"
-                    disabled={cameraControlBusy || cameraControlStatus !== "inactive"}
+                    disabled={cameraControlBusy || !["stopped", "error", "unknown"].includes(cameraControlStatus)}
                     onClick={() => controlCameras("start")}
                     className="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -941,7 +963,7 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    disabled={cameraControlBusy || cameraControlStatus !== "active"}
+                    disabled={cameraControlBusy || cameraControlStatus !== "running"}
                     onClick={() => controlCameras("stop")}
                     className="rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -965,6 +987,13 @@ export default function Home() {
                     className="col-span-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] sm:col-auto"
                   >
                     Members
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { window.location.href = `/admin/cameras?gym=${selectedGym.id}`; }}
+                    className="col-span-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] sm:col-auto"
+                  >
+                    Cameras
                   </button>
                 </div>
               </div>
@@ -1047,7 +1076,7 @@ export default function Home() {
                       </span>
                     </div>
 
-                    {mode === "live" && <LivePlayer key={selectedCamera.id} camera={selectedCamera.stream_path} />}
+                    {mode === "live" && <LivePlayer key={selectedCamera.id} camera={selectedCamera.stream_path} cameraName={selectedCamera.name} />}
 
                     {mode === "delay" && (
                       <DelayedPlayer
