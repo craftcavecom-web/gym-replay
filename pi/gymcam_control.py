@@ -441,7 +441,14 @@ def service_action(action: str) -> dict[str, str]:
         run(["systemctl", action, STREAM_SERVICE], timeout=30)
     result = run(["systemctl", "is-active", STREAM_SERVICE], timeout=10, check=False)
     state = result.stdout.strip().lower()
-    status = "running" if state == "active" else "stopped" if state in {"inactive", "failed"} else "unknown"
+    status_by_state = {
+        "active": "running",
+        "inactive": "stopped",
+        "activating": "starting",
+        "deactivating": "stopping",
+        "failed": "error",
+    }
+    status = status_by_state.get(state, "unknown")
     return {"status": status, "state": state}
 
 

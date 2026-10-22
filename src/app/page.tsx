@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
+import Hls, { ErrorTypes } from "hls.js";
 import { supabase } from "./lib/supabase";
 
 const WEBRTC_BASE = "https://webrtc.gymcam.stream";
@@ -123,10 +123,12 @@ function DelayedPlayer({
   delaySeconds: number;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const delayRef = useRef(delaySeconds);
   const initialSeekDoneRef = useRef(false);
-  const lastCorrectionRef = useRef(0);
-  const [status, setStatus] = useState<"preparing" | "connecting" | "playing" | "reconnecting" | "error">("preparing");
+  const lastHardCorrectionRef = useRef(0);
+  const recoveryAttemptsRef = useRef(0);
+  const [status, setStatus] = useState<"preparing" | "connecting" | "playing" | "buffering" | "reconnecting" | "error">("preparing");
   const [error, setError] = useState("");
   const [availableDelay, setAvailableDelay] = useState(0);
   const [actualDelay, setActualDelay] = useState<number | null>(null);
@@ -142,7 +144,10 @@ function DelayedPlayer({
 
     setAvailableDelay(available);
 
-    const wantedDelay = Math.min(seconds, available);
+    // Do not sit exactly on the first frame of the sliding HLS window. That
+    // frame can disappear on the next playlist refresh and cause a stall.
+    const windowSafetyMargin = Math.min(2, available / 4);
+    const wantedDelay = Math.min(seconds, Math.max(0, available - windowSafetyMargin));
     const target = Math.max(start, end - wantedDelay);
     if (force || Math.abs(video.currentTime - target) > 0.5) {
       video.currentTime = target;
@@ -154,8 +159,17 @@ function DelayedPlayer({
 
   useEffect(() => {
     delayRef.current = delaySeconds;
-    // A user-selected delay change is an intentional, one-time reposition.
-    seekToDelay(delaySeconds, true);
+    const hls = hlsRef.current;
+    if (hls) {
+      hls.config.liveSyncDuration = delaySeconds;
+      hls.config.liveMaxLatencyDuration = delaySeconds + 20;
+    }
+
+    // A user-selected delay change is an intentional reposition, but it must
+    // not tear down the HLS connection and show a false reconnect.
+    if (initialSeekDoneRef.current && seekToDelay(delaySeconds, true)) {
+      lastHardCorrectionRef.current = Date.now();
+    }
   }, [delaySeconds]);
 
   useEffect(() => {
@@ -166,7 +180,8 @@ function DelayedPlayer({
     setError("");
     setActualDelay(null);
     initialSeekDoneRef.current = false;
-    lastCorrectionRef.current = 0;
+    lastHardCorrectionRef.current = 0;
+    recoveryAttemptsRef.current = 0;
     const src = `${HLS_BASE}/${camera}/index.m3u8`;
     let hls: Hls | null = null;
 
@@ -189,31 +204,49 @@ function DelayedPlayer({
       videoRef.current?.play().catch(() => {});
     };
 
-    const correctMeaningfulDrift = () => {
+    const maintainSelectedDelay = () => {
       const video = videoRef.current;
-      if (!video || video.paused || video.seeking || !video.seekable.length) return;
+      if (!video || !video.seekable.length) return;
 
       const end = video.seekable.end(video.seekable.length - 1);
       const available = Math.max(0, end - video.seekable.start(0));
-      const wantedDelay = Math.min(delayRef.current, available);
-      const drift = Math.abs((end - video.currentTime) - wantedDelay);
+      const wantedDelay = Math.min(delayRef.current, Math.max(0, available - Math.min(2, available / 4)));
+      const measuredDelay = Math.max(0, end - video.currentTime);
+      const drift = measuredDelay - wantedDelay;
       const now = Date.now();
 
-      // HLS playlist windows move in chunks. Ignore ordinary 1-2 second movement and
-      // only make a single correction when the offset is plainly wrong.
-      if (drift >= 8 && now - lastCorrectionRef.current >= 30_000) {
-        if (seekToDelay(delayRef.current, true)) lastCorrectionRef.current = now;
+      setAvailableDelay(available);
+      setActualDelay(measuredDelay);
+
+      if (video.paused || video.seeking || !initialSeekDoneRef.current) {
+        video.playbackRate = 1;
+        return;
       }
+
+      // Playlist edges advance in segment-sized steps, so a small amount of
+      // apparent movement is normal. Correct medium drift almost invisibly and
+      // reserve a seek for a clearly wrong offset.
+      const softTolerance = 2.5;
+      const hardTolerance = Math.max(5, Math.min(12, wantedDelay * 0.15));
+      if (Math.abs(drift) >= hardTolerance && now - lastHardCorrectionRef.current >= 15_000) {
+        if (seekToDelay(delayRef.current, true)) {
+          lastHardCorrectionRef.current = now;
+        }
+        return;
+      }
+
+      video.playbackRate = drift > softTolerance ? 1.03 : drift < -softTolerance ? 0.97 : 1;
     };
 
     if (Hls.isSupported()) {
       hls = new Hls({
         lowLatencyMode: false,
         liveSyncDuration: delayRef.current,
-        liveMaxLatencyDuration: delayRef.current + 30,
+        liveMaxLatencyDuration: delayRef.current + 20,
         maxLiveSyncPlaybackRate: 1,
         backBufferLength: Math.max(600, delayRef.current + 60),
       });
+      hlsRef.current = hls;
       hls.loadSource(src);
       hls.attachMedia(videoEl);
       hls.on(Hls.Events.MEDIA_ATTACHED, () => setStatus("connecting"));
@@ -226,8 +259,25 @@ function DelayedPlayer({
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
           console.warn("Fatal delayed HLS error:", data.type, data.details);
-          setStatus("error");
-          setError("The delayed stream could not be loaded. Check the camera connection and try again.");
+          if (recoveryAttemptsRef.current < 3 && data.type === ErrorTypes.NETWORK_ERROR) {
+            recoveryAttemptsRef.current += 1;
+            setStatus("reconnecting");
+            setError("");
+            // Reload the master manifest so an expired MediaMTX HLS session
+            // receives a fresh session URL instead of retrying the same 401.
+            initialSeekDoneRef.current = false;
+            lastHardCorrectionRef.current = 0;
+            hls?.stopLoad();
+            hls?.loadSource(src);
+          } else if (recoveryAttemptsRef.current < 3 && data.type === ErrorTypes.MEDIA_ERROR) {
+            recoveryAttemptsRef.current += 1;
+            setStatus("reconnecting");
+            setError("");
+            hls?.recoverMediaError();
+          } else {
+            setStatus("error");
+            setError("The delayed stream could not be loaded. Check the camera connection and try again.");
+          }
         }
       });
     } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
@@ -244,18 +294,19 @@ function DelayedPlayer({
     }
 
     const statusTimer = window.setInterval(updateDelayStatus, 5_000);
-    const driftTimer = window.setInterval(correctMeaningfulDrift, 15_000);
+    const driftTimer = window.setInterval(maintainSelectedDelay, 2_000);
 
     return () => {
       window.clearInterval(statusTimer);
       window.clearInterval(driftTimer);
+      if (hlsRef.current === hls) hlsRef.current = null;
       hls?.destroy();
 
       videoEl.pause();
       videoEl.removeAttribute("src");
       videoEl.load();
     };
-  }, [camera, delaySeconds, retryKey]);
+  }, [camera, retryKey]);
 
   const statusText = status === "preparing"
     ? "Preparing delayed stream…"
@@ -263,8 +314,10 @@ function DelayedPlayer({
       ? "Connecting…"
       : status === "reconnecting"
         ? "Reconnecting…"
+        : status === "buffering"
+          ? "Buffering delayed stream…"
         : status === "playing"
-          ? `Playing ${formatTime(Math.round(actualDelay ?? delaySeconds))} behind live`
+          ? `Playing ~${formatTime(Math.round(actualDelay ?? delaySeconds))} behind live`
           : "Unable to load delayed stream";
 
   return (
@@ -288,19 +341,16 @@ function DelayedPlayer({
             }
           }}
           onPlaying={() => {
-            if (videoRef.current) videoRef.current.playbackRate = 1;
+            recoveryAttemptsRef.current = 0;
+            setError("");
             setStatus("playing");
-          }}
-          onRateChange={() => {
-            if (videoRef.current && videoRef.current.playbackRate !== 1) {
-              videoRef.current.playbackRate = 1;
-            }
           }}
           onError={() => {
             setStatus("error");
             setError("The delayed stream could not be loaded. Try again in a few seconds.");
           }}
-          onWaiting={() => setStatus((current) => current === "error" ? current : "reconnecting")}
+          onWaiting={() => setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering")}
+          onStalled={() => setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering")}
           className="aspect-video w-full bg-black object-contain"
         />
       </div>
@@ -418,6 +468,7 @@ export default function Home() {
   const [cameraControlStatus, setCameraControlStatus] = useState<CameraSystemStatus>("unknown");
   const [cameraControlMessage, setCameraControlMessage] = useState("");
   const [cameraControlBusy, setCameraControlBusy] = useState(false);
+  const [streamReloadKey, setStreamReloadKey] = useState(0);
 
   async function checkUser() {
     const {
@@ -892,20 +943,46 @@ export default function Home() {
       } = await supabase.auth.getSession();
 
       if (!session) {
+        setCameraControlStatus("error");
         setCameraControlMessage("Not signed in.");
         return;
       }
 
-      const response = await fetch("/api/camera-control", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ action, gymId }),
-      });
+      if (!gymId) {
+        setCameraControlStatus("error");
+        setCameraControlMessage("Choose a gym first.");
+        return;
+      }
 
-      const data = await response.json();
+      const requestControl = async (requestedAction: "start" | "stop" | "status") => {
+        const isStatus = requestedAction === "status";
+        const response = await fetch(
+          isStatus ? `/api/camera-control?gymId=${encodeURIComponent(gymId)}` : "/api/camera-control",
+          {
+            method: isStatus ? "GET" : "POST",
+            headers: {
+              ...(isStatus ? {} : { "Content-Type": "application/json" }),
+              Authorization: `Bearer ${session.access_token}`,
+            },
+            ...(isStatus ? {} : { body: JSON.stringify({ action: requestedAction, gymId }) }),
+            cache: "no-store",
+          },
+        );
+        const data = await response.json().catch(() => ({}));
+        return { response, data };
+      };
+
+      const normalizeStatus = (data: { status?: unknown; state?: unknown }): CameraSystemStatus => {
+        const rawStatus = data.status ?? data.state;
+        const aliases: Record<string, CameraSystemStatus> = {
+          active: "running", inactive: "stopped", online: "running", offline: "stopped",
+          activating: "starting", deactivating: "stopping", running: "running", stopped: "stopped",
+          starting: "starting", stopping: "stopping", failed: "error", error: "error",
+        };
+        return typeof rawStatus === "string" ? aliases[rawStatus.toLowerCase()] ?? "unknown" : "unknown";
+      };
+
+      let { response, data } = await requestControl(action);
 
       if (!response.ok) {
         setCameraControlStatus("error");
@@ -913,13 +990,32 @@ export default function Home() {
         return;
       }
 
-      const rawStatus = data.status ?? data.state;
-      const aliases: Record<string, CameraSystemStatus> = {
-        active: "running", inactive: "stopped", online: "running", offline: "stopped",
-        running: "running", stopped: "stopped", starting: "starting", stopping: "stopping", error: "error",
-      };
-      const status = typeof rawStatus === "string" ? aliases[rawStatus.toLowerCase()] ?? "unknown" : "unknown";
+      let status = normalizeStatus(data);
+      const targetStatus = action === "start" ? "running" : action === "stop" ? "stopped" : null;
+      if (targetStatus) {
+        setCameraControlStatus(action === "start" ? "starting" : "stopping");
+        for (let attempt = 0; status !== targetStatus && attempt < 30; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+          ({ response, data } = await requestControl("status"));
+          if (!response.ok) {
+            setCameraControlStatus("error");
+            setCameraControlMessage(data.error ?? "Camera control failed while confirming status.");
+            return;
+          }
+          status = normalizeStatus(data);
+          if (status === "error") break;
+        }
+        if (status !== targetStatus) {
+          setCameraControlStatus(status === "error" ? "error" : "unknown");
+          setCameraControlMessage(`Camera system did not confirm it was ${targetStatus}.`);
+          return;
+        }
+      }
+
       setCameraControlStatus(status);
+      if (action === "start" && status === "running") {
+        setStreamReloadKey((value) => value + 1);
+      }
 
       if (!quiet) {
         setCameraControlMessage(
@@ -1036,7 +1132,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-2 sm:flex">
                   <button
                     type="button"
-                    disabled={cameraControlBusy || !["stopped", "error", "unknown"].includes(cameraControlStatus)}
+                    disabled={cameraControlBusy || cameraControlStatus !== "stopped"}
                     onClick={() => controlCameras("start")}
                     className="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -1157,10 +1253,11 @@ export default function Home() {
                       </span>
                     </div>
 
-                    {mode === "live" && <LivePlayer key={selectedCamera.id} camera={selectedCamera.stream_path} cameraName={selectedCamera.name} />}
+                    {mode === "live" && <LivePlayer key={`${selectedCamera.id}:${streamReloadKey}`} camera={selectedCamera.stream_path} cameraName={selectedCamera.name} />}
 
                     {mode === "delay" && (
                       <DelayedPlayer
+                        key={`${selectedCamera.id}:${streamReloadKey}`}
                         camera={selectedCamera.stream_path}
                         delaySeconds={delaySeconds}
                       />
