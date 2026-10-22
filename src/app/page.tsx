@@ -957,6 +957,15 @@ export default function Home() {
                   >
                     Clip History
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      window.location.href = `/admin/members?gym=${selectedGym.id}`;
+                    }}
+                    className="col-span-2 rounded-xl border border-white/10 bg-white/[0.05] px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.09] sm:col-auto"
+                  >
+                    Members
+                  </button>
                 </div>
               </div>
 
