@@ -126,8 +126,7 @@ function DelayedPlayer({
   const hlsRef = useRef<Hls | null>(null);
   const delayRef = useRef(delaySeconds);
   const initialSeekDoneRef = useRef(false);
-  const lastHardCorrectionRef = useRef(0);
-  const resyncRequestedRef = useRef(false);
+  const stallRecoveryTimerRef = useRef<number | null>(null);
   const recoveryAttemptsRef = useRef(0);
   const [status, setStatus] = useState<"preparing" | "connecting" | "playing" | "buffering" | "reconnecting" | "error">("preparing");
   const [error, setError] = useState("");
@@ -161,20 +160,44 @@ function DelayedPlayer({
     const start = video.seekable.start(0);
     const end = video.seekable.end(video.seekable.length - 1);
     const available = Math.max(0, end - start);
-    const safetyMargin = Math.min(2, available / 4);
-    return available - safetyMargin >= seconds - 1;
+    // "5m" should become usable when a five-minute window exists. The seek
+    // itself keeps a small margin from the expiring first segment, so the
+    // resulting offset may intentionally be a second or two short of exact.
+    return available >= Math.max(0, seconds - 2);
+  }
+
+  function scheduleStallRecovery() {
+    const video = videoRef.current;
+    if (!video || stallRecoveryTimerRef.current !== null) return;
+    const stalledAt = video.currentTime;
+
+    // A short `waiting` event is normal at a segment boundary. Let the
+    // browser recover naturally and only reposition after a real, sustained
+    // stall where the playhead has not advanced for eight seconds.
+    stallRecoveryTimerRef.current = window.setTimeout(() => {
+      stallRecoveryTimerRef.current = null;
+      const currentVideo = videoRef.current;
+      if (!currentVideo || currentVideo.currentTime > stalledAt + 1) return;
+      if (seekToDelay(delayRef.current)) {
+        setStatus("reconnecting");
+        currentVideo.playbackRate = 1;
+        currentVideo.play().catch(() => {});
+      }
+    }, 8_000);
   }
 
   useEffect(() => {
     delayRef.current = delaySeconds;
     // HLS uses this only as a guardrail. Keep it beyond the requested offset
     // so a user selecting a longer delay does not trigger a live-edge catch-up.
-    if (hlsRef.current) hlsRef.current.config.liveMaxLatencyDuration = delaySeconds + 30;
+    if (hlsRef.current) {
+      hlsRef.current.config.liveMaxLatencyDuration = Math.max(720, delaySeconds + 120);
+    }
 
     // A user-selected delay change is an intentional reposition, but it must
     // not tear down the HLS connection and show a false reconnect.
     if (initialSeekDoneRef.current && seekToDelay(delaySeconds)) {
-      lastHardCorrectionRef.current = Date.now();
+      setStatus("playing");
     } else if (!videoRef.current || !hasEnoughHistory(videoRef.current, delaySeconds)) {
       // Keep the existing stream attached while the HLS window grows, but do
       // not say the newly requested offset is active before it can be reached.
@@ -191,8 +214,6 @@ function DelayedPlayer({
     setError("");
     setActualDelay(null);
     initialSeekDoneRef.current = false;
-    lastHardCorrectionRef.current = 0;
-    resyncRequestedRef.current = false;
     recoveryAttemptsRef.current = 0;
     const src = `${HLS_BASE}/${camera}/index.m3u8`;
     let hls: Hls | null = null;
@@ -218,56 +239,8 @@ function DelayedPlayer({
 
       if (!initialSeekDoneRef.current && !seekToDelay(delayRef.current)) return;
       initialSeekDoneRef.current = true;
-      resyncRequestedRef.current = false;
       video.playbackRate = 1;
       video.play().catch(() => {});
-    };
-
-    const updateDelayedPlayback = () => {
-      const video = videoRef.current;
-      if (!video || !video.seekable.length) return;
-
-      const end = video.seekable.end(video.seekable.length - 1);
-      const available = Math.max(0, end - video.seekable.start(0));
-      const measuredDelay = Math.max(0, end - video.currentTime);
-      const now = Date.now();
-
-      setAvailableDelay(available);
-      setActualDelay(measuredDelay);
-
-      if (!hasEnoughHistory(video, delayRef.current)) {
-        video.playbackRate = 1;
-        setStatus("preparing");
-        return;
-      }
-
-      if (!initialSeekDoneRef.current) {
-        startDelayedPlayback();
-        return;
-      }
-
-      if (video.paused || video.seeking) {
-        video.playbackRate = 1;
-        return;
-      }
-
-      if (video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-        setStatus((current) => current === "error" || current === "reconnecting" ? current : "playing");
-      }
-
-      // Playback normally runs untouched at 1x. A single seek is reserved for
-      // a genuine stall/reconnect or an offset that is clearly unusable.
-      const hardTolerance = Math.max(20, delayRef.current * 0.35);
-      if (
-        (resyncRequestedRef.current || Math.abs(measuredDelay - delayRef.current) > hardTolerance) &&
-        now - lastHardCorrectionRef.current >= 20_000
-      ) {
-        if (seekToDelay(delayRef.current)) {
-          lastHardCorrectionRef.current = now;
-          resyncRequestedRef.current = false;
-          video.play().catch(() => {});
-        }
-      }
     };
 
     if (Hls.isSupported()) {
@@ -276,9 +249,10 @@ function DelayedPlayer({
         // Leave room for the selected offset so hls.js does not catch up to
         // live on its own. The component performs the one deliberate seek.
         liveSyncDuration: 10,
-        liveMaxLatencyDuration: delayRef.current + 30,
+        liveMaxLatencyDuration: Math.max(720, delayRef.current + 120),
         maxLiveSyncPlaybackRate: 1,
-        backBufferLength: Math.max(600, delayRef.current + 60),
+        backBufferLength: 90,
+        maxBufferLength: 60,
       });
       hlsRef.current = hls;
       hls.loadSource(src);
@@ -300,8 +274,6 @@ function DelayedPlayer({
             // Reload the master manifest so an expired MediaMTX HLS session
             // receives a fresh session URL instead of retrying the same 401.
             initialSeekDoneRef.current = false;
-            lastHardCorrectionRef.current = 0;
-            resyncRequestedRef.current = true;
             hls?.stopLoad();
             hls?.loadSource(src);
           } else if (recoveryAttemptsRef.current < 3 && data.type === ErrorTypes.MEDIA_ERROR) {
@@ -329,11 +301,13 @@ function DelayedPlayer({
     }
 
     const statusTimer = window.setInterval(updateDelayStatus, 5_000);
-    const playbackTimer = window.setInterval(updateDelayedPlayback, 5_000);
 
     return () => {
       window.clearInterval(statusTimer);
-      window.clearInterval(playbackTimer);
+      if (stallRecoveryTimerRef.current !== null) {
+        window.clearTimeout(stallRecoveryTimerRef.current);
+        stallRecoveryTimerRef.current = null;
+      }
       if (hlsRef.current === hls) hlsRef.current = null;
       hls?.destroy();
 
@@ -344,15 +318,15 @@ function DelayedPlayer({
   }, [camera, retryKey]);
 
   const statusText = status === "preparing"
-    ? "Preparing delayed stream…"
+    ? `Preparing -${formatTime(delaySeconds)}…`
     : status === "connecting"
       ? "Connecting…"
       : status === "reconnecting"
         ? "Reconnecting…"
         : status === "buffering"
-          ? "Buffering delayed stream…"
+          ? "Buffering…"
         : status === "playing"
-          ? `Playing ~${formatTime(Math.round(actualDelay ?? delaySeconds))} behind live`
+          ? `Playing ${formatTime(delaySeconds)} behind live`
           : "Unable to load delayed stream";
 
   return (
@@ -366,11 +340,15 @@ function DelayedPlayer({
 
         <video
           ref={videoRef}
-          controls
           autoPlay
           muted
           playsInline
+          data-actual-delay={actualDelay === null ? undefined : Math.round(actualDelay * 10) / 10}
           onPlaying={() => {
+            if (stallRecoveryTimerRef.current !== null) {
+              window.clearTimeout(stallRecoveryTimerRef.current);
+              stallRecoveryTimerRef.current = null;
+            }
             recoveryAttemptsRef.current = 0;
             setError("");
             const video = videoRef.current;
@@ -381,12 +359,12 @@ function DelayedPlayer({
             setError("The delayed stream could not be loaded. Try again in a few seconds.");
           }}
           onWaiting={() => {
-            resyncRequestedRef.current = true;
             setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering");
+            scheduleStallRecovery();
           }}
           onStalled={() => {
-            resyncRequestedRef.current = true;
             setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering");
+            scheduleStallRecovery();
           }}
           className="aspect-video w-full bg-black object-contain"
         />
@@ -411,6 +389,37 @@ function DelayedPlayer({
           {formatTime(Math.floor(availableDelay))}
         </span>
       </div>
+    </div>
+  );
+}
+
+function DelayControls({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2" aria-label="Delay from live">
+      {TIME_PRESETS.map((seconds) => {
+        const selected = value === seconds;
+        return (
+          <button
+            key={seconds}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onChange(seconds)}
+            className={`min-w-[3.75rem] flex-1 rounded-full border px-3 py-2.5 text-sm font-semibold transition sm:flex-none ${
+              selected
+                ? "border-blue-300/50 bg-blue-400 text-blue-950 shadow-lg shadow-blue-500/10"
+                : "border-white/10 bg-white/[0.04] text-zinc-300 hover:bg-white/[0.08]"
+            }`}
+          >
+            -{formatTime(seconds)}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -646,6 +655,9 @@ export default function Home() {
       savedMode = ["live", "delay", "replay"].includes(saved?.mode)
         ? saved.mode
         : undefined;
+      if (TIME_PRESETS.includes(saved?.delaySeconds)) {
+        setDelaySeconds(saved.delaySeconds);
+      }
     } catch {}
     if (cameraRows.length > 0) {
       setSelectedCamera(cameraRows.find((camera) => camera.id === savedCameraId) ?? cameraRows[0]);
@@ -665,7 +677,7 @@ export default function Home() {
 
   function chooseCamera(camera: Camera) {
     setSelectedCamera(camera);
-    setMode("live");
+    if (mode === "replay") setMode("live");
     setReplayUrl("");
     setReplayMessage("");
   }
@@ -1112,9 +1124,9 @@ export default function Home() {
     if (!selectedGym || !selectedCamera) return;
     window.sessionStorage.setItem(
       "gymcam:view",
-      JSON.stringify({ gymId: selectedGym.id, cameraId: selectedCamera.id, mode }),
+      JSON.stringify({ gymId: selectedGym.id, cameraId: selectedCamera.id, mode, delaySeconds }),
     );
-  }, [selectedGym, selectedCamera, mode]);
+  }, [selectedGym, selectedCamera, mode, delaySeconds]);
 
   if (userEmail && selectedGym) {
     const isAdmin = selectedGym.role === "admin";
@@ -1169,7 +1181,7 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-2 sm:flex">
                   <button
                     type="button"
-                    disabled={cameraControlBusy || cameraControlStatus !== "stopped"}
+                    disabled={cameraControlBusy || ["running", "starting", "stopping"].includes(cameraControlStatus)}
                     onClick={() => controlCameras("start")}
                     className="rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
                   >
@@ -1285,7 +1297,7 @@ export default function Home() {
                         {mode === "live"
                           ? "● LIVE"
                           : mode === "delay"
-                            ? `${formatTime(delaySeconds)} DELAY`
+                            ? `-${formatTime(delaySeconds)} DELAY`
                             : "REPLAY"}
                       </span>
                     </div>
@@ -1440,11 +1452,11 @@ export default function Home() {
                               </p>
                             </div>
                             <span className="rounded-lg bg-blue-500/10 px-2.5 py-1.5 text-sm font-bold text-blue-300">
-                              {formatTime(delaySeconds)}
+                              -{formatTime(delaySeconds)}
                             </span>
                           </div>
 
-                          <TimeControls value={delaySeconds} min={5} onChange={setDelaySeconds} />
+                          <DelayControls value={delaySeconds} onChange={setDelaySeconds} />
 
                           <button
                             type="button"
