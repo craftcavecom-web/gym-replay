@@ -127,6 +127,7 @@ function DelayedPlayer({
   const delayRef = useRef(delaySeconds);
   const initialSeekDoneRef = useRef(false);
   const lastHardCorrectionRef = useRef(0);
+  const resyncRequestedRef = useRef(false);
   const recoveryAttemptsRef = useRef(0);
   const [status, setStatus] = useState<"preparing" | "connecting" | "playing" | "buffering" | "reconnecting" | "error">("preparing");
   const [error, setError] = useState("");
@@ -134,9 +135,9 @@ function DelayedPlayer({
   const [actualDelay, setActualDelay] = useState<number | null>(null);
   const [retryKey, setRetryKey] = useState(0);
 
-  function seekToDelay(seconds: number, force = false) {
+  function seekToDelay(seconds: number) {
     const video = videoRef.current;
-    if (!video || !video.seekable.length) return false;
+    if (!video || !hasEnoughHistory(video, seconds)) return false;
 
     const start = video.seekable.start(0);
     const end = video.seekable.end(video.seekable.length - 1);
@@ -149,9 +150,7 @@ function DelayedPlayer({
     const windowSafetyMargin = Math.min(2, available / 4);
     const wantedDelay = Math.min(seconds, Math.max(0, available - windowSafetyMargin));
     const target = Math.max(start, end - wantedDelay);
-    if (force || Math.abs(video.currentTime - target) > 0.5) {
-      video.currentTime = target;
-    }
+    video.currentTime = target;
     video.playbackRate = 1;
     setActualDelay(Math.max(0, end - target));
     return true;
@@ -168,16 +167,19 @@ function DelayedPlayer({
 
   useEffect(() => {
     delayRef.current = delaySeconds;
-    const hls = hlsRef.current;
-    if (hls) {
-      hls.config.liveSyncDuration = delaySeconds;
-      hls.config.liveMaxLatencyDuration = delaySeconds + 20;
-    }
+    // HLS uses this only as a guardrail. Keep it beyond the requested offset
+    // so a user selecting a longer delay does not trigger a live-edge catch-up.
+    if (hlsRef.current) hlsRef.current.config.liveMaxLatencyDuration = delaySeconds + 30;
 
     // A user-selected delay change is an intentional reposition, but it must
     // not tear down the HLS connection and show a false reconnect.
-    if (initialSeekDoneRef.current && seekToDelay(delaySeconds, true)) {
+    if (initialSeekDoneRef.current && seekToDelay(delaySeconds)) {
       lastHardCorrectionRef.current = Date.now();
+    } else if (!videoRef.current || !hasEnoughHistory(videoRef.current, delaySeconds)) {
+      // Keep the existing stream attached while the HLS window grows, but do
+      // not say the newly requested offset is active before it can be reached.
+      initialSeekDoneRef.current = false;
+      setStatus("preparing");
     }
   }, [delaySeconds]);
 
@@ -190,6 +192,7 @@ function DelayedPlayer({
     setActualDelay(null);
     initialSeekDoneRef.current = false;
     lastHardCorrectionRef.current = 0;
+    resyncRequestedRef.current = false;
     recoveryAttemptsRef.current = 0;
     const src = `${HLS_BASE}/${camera}/index.m3u8`;
     let hls: Hls | null = null;
@@ -206,38 +209,44 @@ function DelayedPlayer({
       setActualDelay(Math.max(0, end - video.currentTime));
     };
 
-    const seekInitially = () => {
-      if (initialSeekDoneRef.current) return;
-      if (!seekToDelay(delayRef.current, true)) return;
+    const startDelayedPlayback = () => {
+      const video = videoRef.current;
+      if (!video || !hasEnoughHistory(video, delayRef.current)) {
+        setStatus("preparing");
+        return;
+      }
+
+      if (!initialSeekDoneRef.current && !seekToDelay(delayRef.current)) return;
       initialSeekDoneRef.current = true;
-      videoRef.current?.play().catch(() => {});
+      resyncRequestedRef.current = false;
+      video.playbackRate = 1;
+      video.play().catch(() => {});
     };
 
-    const maintainSelectedDelay = () => {
+    const updateDelayedPlayback = () => {
       const video = videoRef.current;
       if (!video || !video.seekable.length) return;
 
       const end = video.seekable.end(video.seekable.length - 1);
       const available = Math.max(0, end - video.seekable.start(0));
-      const wantedDelay = Math.min(delayRef.current, Math.max(0, available - Math.min(2, available / 4)));
       const measuredDelay = Math.max(0, end - video.currentTime);
-      const drift = measuredDelay - wantedDelay;
       const now = Date.now();
 
       setAvailableDelay(available);
       setActualDelay(measuredDelay);
 
-      // A fresh on-demand HLS session may initially expose only a few seconds
-      // of history. Keep playing it silently behind the preparation overlay so
-      // the window can grow, but do not claim the requested delay is active
-      // until that offset is actually available.
       if (!hasEnoughHistory(video, delayRef.current)) {
         video.playbackRate = 1;
         setStatus("preparing");
         return;
       }
 
-      if (video.paused || video.seeking || !initialSeekDoneRef.current) {
+      if (!initialSeekDoneRef.current) {
+        startDelayedPlayback();
+        return;
+      }
+
+      if (video.paused || video.seeking) {
         video.playbackRate = 1;
         return;
       }
@@ -246,26 +255,28 @@ function DelayedPlayer({
         setStatus((current) => current === "error" || current === "reconnecting" ? current : "playing");
       }
 
-      // Playlist edges advance in segment-sized steps, so a small amount of
-      // apparent movement is normal. Correct medium drift almost invisibly and
-      // reserve a seek for a clearly wrong offset.
-      const softTolerance = 2.5;
-      const hardTolerance = Math.max(5, Math.min(12, wantedDelay * 0.15));
-      if (Math.abs(drift) >= hardTolerance && now - lastHardCorrectionRef.current >= 15_000) {
-        if (seekToDelay(delayRef.current, true)) {
+      // Playback normally runs untouched at 1x. A single seek is reserved for
+      // a genuine stall/reconnect or an offset that is clearly unusable.
+      const hardTolerance = Math.max(20, delayRef.current * 0.35);
+      if (
+        (resyncRequestedRef.current || Math.abs(measuredDelay - delayRef.current) > hardTolerance) &&
+        now - lastHardCorrectionRef.current >= 20_000
+      ) {
+        if (seekToDelay(delayRef.current)) {
           lastHardCorrectionRef.current = now;
+          resyncRequestedRef.current = false;
+          video.play().catch(() => {});
         }
-        return;
       }
-
-      video.playbackRate = drift > softTolerance ? 1.03 : drift < -softTolerance ? 0.97 : 1;
     };
 
     if (Hls.isSupported()) {
       hls = new Hls({
         lowLatencyMode: false,
-        liveSyncDuration: delayRef.current,
-        liveMaxLatencyDuration: delayRef.current + 20,
+        // Leave room for the selected offset so hls.js does not catch up to
+        // live on its own. The component performs the one deliberate seek.
+        liveSyncDuration: 10,
+        liveMaxLatencyDuration: delayRef.current + 30,
         maxLiveSyncPlaybackRate: 1,
         backBufferLength: Math.max(600, delayRef.current + 60),
       });
@@ -275,9 +286,9 @@ function DelayedPlayer({
       hls.on(Hls.Events.MEDIA_ATTACHED, () => setStatus("connecting"));
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        window.setTimeout(seekInitially, 250);
+        window.setTimeout(startDelayedPlayback, 250);
       });
-      hls.on(Hls.Events.LEVEL_UPDATED, seekInitially);
+      hls.on(Hls.Events.LEVEL_UPDATED, startDelayedPlayback);
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
@@ -290,6 +301,7 @@ function DelayedPlayer({
             // receives a fresh session URL instead of retrying the same 401.
             initialSeekDoneRef.current = false;
             lastHardCorrectionRef.current = 0;
+            resyncRequestedRef.current = true;
             hls?.stopLoad();
             hls?.loadSource(src);
           } else if (recoveryAttemptsRef.current < 3 && data.type === ErrorTypes.MEDIA_ERROR) {
@@ -308,7 +320,7 @@ function DelayedPlayer({
       setStatus("connecting");
       videoEl.addEventListener(
         "loadedmetadata",
-        seekInitially,
+        startDelayedPlayback,
         { once: true },
       );
     } else {
@@ -317,11 +329,11 @@ function DelayedPlayer({
     }
 
     const statusTimer = window.setInterval(updateDelayStatus, 5_000);
-    const driftTimer = window.setInterval(maintainSelectedDelay, 2_000);
+    const playbackTimer = window.setInterval(updateDelayedPlayback, 5_000);
 
     return () => {
       window.clearInterval(statusTimer);
-      window.clearInterval(driftTimer);
+      window.clearInterval(playbackTimer);
       if (hlsRef.current === hls) hlsRef.current = null;
       hls?.destroy();
 
@@ -358,23 +370,24 @@ function DelayedPlayer({
           autoPlay
           muted
           playsInline
-          onLoadedMetadata={() => {
-            if (!initialSeekDoneRef.current && seekToDelay(delayRef.current, true)) {
-              initialSeekDoneRef.current = true;
-            }
-          }}
           onPlaying={() => {
             recoveryAttemptsRef.current = 0;
             setError("");
             const video = videoRef.current;
-            setStatus(video && hasEnoughHistory(video, delayRef.current) ? "playing" : "preparing");
+            setStatus(video && initialSeekDoneRef.current && hasEnoughHistory(video, delayRef.current) ? "playing" : "preparing");
           }}
           onError={() => {
             setStatus("error");
             setError("The delayed stream could not be loaded. Try again in a few seconds.");
           }}
-          onWaiting={() => setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering")}
-          onStalled={() => setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering")}
+          onWaiting={() => {
+            resyncRequestedRef.current = true;
+            setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering");
+          }}
+          onStalled={() => {
+            resyncRequestedRef.current = true;
+            setStatus((current) => current === "error" || current === "reconnecting" ? current : "buffering");
+          }}
           className="aspect-video w-full bg-black object-contain"
         />
       </div>
